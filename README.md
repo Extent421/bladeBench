@@ -7,3 +7,4 @@ required libraries:
 teensyduino - https://www.pjrc.com/teensy/td_download.html
 hx711 - https://github.com/bogde/HX711
 SDFat - https://github.com/greiman/SdFat
+ADC   - https://github.com/pedvide/ADC
