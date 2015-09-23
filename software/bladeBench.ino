@@ -131,16 +131,16 @@ void setup() {
 	pinMode(BUTTON_PIN, INPUT_PULLUP);
 
 	adc->setReference(ADC_REF_EXT, ADC_0);
-    adc->setAveraging(1, ADC_0); // set number of averages
+    adc->setAveraging(16, ADC_0); // set number of averages
     adc->setResolution(16, ADC_0); // set bits of resolution
-    adc->setConversionSpeed(ADC_HIGH_SPEED_16BITS, ADC_0); // change the conversion speed
-    adc->setSamplingSpeed(ADC_HIGH_SPEED_16BITS, ADC_0); // change the sampling speed
+    adc->setConversionSpeed(ADC_MED_SPEED, ADC_0); // change the conversion speed
+    adc->setSamplingSpeed(ADC_MED_SPEED  , ADC_0); // change the sampling speed
 
 	adc->setReference(ADC_REF_EXT, ADC_1);
-    adc->setAveraging(1, ADC_1); // set number of averages
+    adc->setAveraging(16, ADC_1); // set number of averages
     adc->setResolution(16, ADC_1); // set bits of resolution
-    adc->setConversionSpeed(ADC_HIGH_SPEED_16BITS, ADC_1); // change the conversion speed
-    adc->setSamplingSpeed(ADC_HIGH_SPEED_16BITS, ADC_1); // change the sampling speed
+    adc->setConversionSpeed(ADC_MED_SPEED, ADC_1); // change the conversion speed
+    adc->setSamplingSpeed(ADC_MED_SPEED  , ADC_1); // change the sampling speed
 
     adc->enableCompare(1.0/2.5*adc->getMaxValue(ADC_0), 0, ADC_0); // measurement will be ready if value < 1.0V
     adc->enableCompare(1.0/2.5*adc->getMaxValue(ADC_1), 0, ADC_1); // measurement will be ready if value < 1.0V
@@ -179,10 +179,10 @@ void buildTest(){
 	commandBuffer[0].value = 1100;
 	commandBuffer[1].mode = MODE_RAMP;
 	commandBuffer[1].time = 4000;
-	commandBuffer[1].value = 1500;
+	commandBuffer[1].value = 2000;
 	commandBuffer[2].mode = MODE_HOLD;
 	commandBuffer[2].time = 2000;
-	commandBuffer[2].value = 1500;
+	commandBuffer[2].value = 2000;
 	commandBuffer[3].mode = MODE_HOLD;
 	commandBuffer[3].time = 1000;
 	commandBuffer[3].value = 1100;
@@ -200,13 +200,13 @@ void buildTest(){
 	commandBuffer[7].value = 1100;
 	commandBuffer[8].mode = MODE_HOLD;
 	commandBuffer[8].time = 1000;
-	commandBuffer[8].value = 1500;
+	commandBuffer[8].value = 1750;
 	commandBuffer[9].mode = MODE_HOLD;
 	commandBuffer[9].time = 1000;
 	commandBuffer[9].value = 1100;
 	commandBuffer[10].mode = MODE_HOLD;
 	commandBuffer[10].time = 1000;
-	commandBuffer[10].value = 1500;
+	commandBuffer[10].value = 2000;
 	commandBuffer[11].mode = MODE_HOLD;
 	commandBuffer[11].time = 1000;
 	commandBuffer[11].value = 1100;
@@ -265,7 +265,11 @@ void log(){
 
 	//format the CSV line
 	sprintf(str, "%lu, %i, %.3f, %.3f, %.3f, %.3f, %.2f\n", time, commandValue, a1, a2, a3, a4, scaleValue);
+	writeToBuffer(str);
 
+}
+
+void writeToBuffer(char* str){
 	//write the CSV line to the block buffer
 	size_t thisLength;
 	size_t bufferLength;
@@ -295,6 +299,7 @@ void log(){
 		strcat(writeBuffer[writeIndex].data, str);
 	}
 }
+
 
 unsigned int nextBuffer(unsigned int index){
 	// return the next index for the ring buffer
@@ -389,9 +394,12 @@ void doTestLog() {
 	Serial.println("logging...");
 
 	buildTest();
+
+	writeToBuffer("time, motor, t1, t2, volt, amp, thrust\n");
+
 	// start the log sampling ISR
 	logSampler.priority(200); // set lowish priority.  We want to let regular fast ISRs (like servo timing) to be able to interrupt
-	logSampler.begin(log, 10000); // start logger, 1000 micros = 1khz, 10000micros = 100hz
+	logSampler.begin(log, 5000); // start logger, 1000 micros = 1khz, 10000micros = 100hz
 	runCurrentCommand();
 
 	bool running = true;
@@ -547,7 +555,7 @@ double getAmps(float rawValue){
 
 void setupLoadCell() {
 	// TODO: calibration
-	scale.set_scale(2280.f);          // this value is obtained by calibrating the scale with known weights;
+	scale.set_scale(392.9f);          // this value is obtained by calibrating the scale with known weights;
 	scale.tare(8);				        // reset the scale to 0, 8 samples average
 }
 
@@ -560,6 +568,6 @@ void powerScale() {
 void updateScaleValue() {
 	// update the global measurement value, but only if the scale is ready to be read
 	if (scale.is_ready()){
-		scaleValue = scale.get_value();
+		scaleValue = scale.get_units();
 	}
 }
