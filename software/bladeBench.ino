@@ -38,6 +38,10 @@ elapsedMillis loopTime;
 elapsedMicros testTime;
 elapsedMicros commandTime;
 
+elapsedMicros tachTime;
+volatile unsigned long lastTachPulse = 0;
+uint8_t pulsesPerRev = 2;
+
 elapsedMillis buttonTime;
 bool buttonRunning = false;
 bool buttonLatch = false;
@@ -163,6 +167,14 @@ void setup() {
 	for (unsigned int i=0; i<MAXBUFFERS; i++ ) {
 		memset(writeBuffer[i].data, 0, BUFFERSIZE+1);
 	}
+	pinMode(TACH_PIN, INPUT);
+}
+
+void tachISR() {
+	unsigned long time;
+	time = tachTime;
+	lastTachPulse = time ;
+	tachTime = tachTime - time;
 }
 
 void buildTest(){
@@ -176,40 +188,46 @@ void buildTest(){
 
 	commandBuffer[0].mode = MODE_HOLD;
 	commandBuffer[0].time = 1000;
-	commandBuffer[0].value = 1100;
-	commandBuffer[1].mode = MODE_RAMP;
-	commandBuffer[1].time = 4000;
-	commandBuffer[1].value = 2000;
-	commandBuffer[2].mode = MODE_HOLD;
-	commandBuffer[2].time = 2000;
+	commandBuffer[0].value = 1000;
+	commandBuffer[1].mode = MODE_HOLD;
+	commandBuffer[1].time = 1000;
+	commandBuffer[1].value = 1100;
+	commandBuffer[2].mode = MODE_RAMP;
+	commandBuffer[2].time = 4000;
 	commandBuffer[2].value = 2000;
 	commandBuffer[3].mode = MODE_HOLD;
-	commandBuffer[3].time = 1000;
-	commandBuffer[3].value = 1100;
+	commandBuffer[3].time = 2000;
+	commandBuffer[3].value = 2000;
 	commandBuffer[4].mode = MODE_HOLD;
 	commandBuffer[4].time = 1000;
-	commandBuffer[4].value = 1250;
+	commandBuffer[4].value = 1100;
 	commandBuffer[5].mode = MODE_HOLD;
-	commandBuffer[5].time = 1000;
-	commandBuffer[5].value = 1100;
+	commandBuffer[5].time = 2000;
+	commandBuffer[5].value = 1250;
 	commandBuffer[6].mode = MODE_HOLD;
 	commandBuffer[6].time = 1000;
-	commandBuffer[6].value = 1500;
+	commandBuffer[6].value = 1100;
 	commandBuffer[7].mode = MODE_HOLD;
-	commandBuffer[7].time = 1000;
-	commandBuffer[7].value = 1100;
+	commandBuffer[7].time = 2000;
+	commandBuffer[7].value = 1500;
 	commandBuffer[8].mode = MODE_HOLD;
 	commandBuffer[8].time = 1000;
-	commandBuffer[8].value = 1750;
+	commandBuffer[8].value = 1100;
 	commandBuffer[9].mode = MODE_HOLD;
-	commandBuffer[9].time = 1000;
-	commandBuffer[9].value = 1100;
+	commandBuffer[9].time = 2000;
+	commandBuffer[9].value = 1750;
 	commandBuffer[10].mode = MODE_HOLD;
 	commandBuffer[10].time = 1000;
-	commandBuffer[10].value = 2000;
+	commandBuffer[10].value = 1100;
 	commandBuffer[11].mode = MODE_HOLD;
-	commandBuffer[11].time = 1000;
-	commandBuffer[11].value = 1100;
+	commandBuffer[11].time = 2000;
+	commandBuffer[11].value = 2000;
+	commandBuffer[12].mode = MODE_HOLD;
+	commandBuffer[12].time = 1000;
+	commandBuffer[12].value = 1100;
+	commandBuffer[13].mode = MODE_HOLD;
+	commandBuffer[13].time = 1000;
+	commandBuffer[13].value = 1000;
 
 
 }
@@ -222,6 +240,7 @@ void log(){
 	int commandValue;
 	char str[80];
 	unsigned long time;
+	double RPM=0;
 
 	//check if we're sitting in an overflow state and dump the sample if needed
 	if (writeBuffer[writeIndex].full==true) {
@@ -247,7 +266,6 @@ void log(){
     a4 = getAmps( (uint16_t)ADCresult.result_adc1 );
 	*/
 
-
 	rawTemp = (uint16_t)adc->analogRead(T1_PIN, ADC_0);
 	a1 = getTemp(rawTemp);
 	rawTemp = (uint16_t)adc->analogRead(T2_PIN, ADC_0);
@@ -263,8 +281,11 @@ void log(){
 	//make note of the current command micros for the ESC
 	commandValue = ESC.readMicroseconds();
 
+	//RPM
+	RPM = ((1000000.0/lastTachPulse)/pulsesPerRev )*60;
+
 	//format the CSV line
-	sprintf(str, "%lu, %i, %.3f, %.3f, %.3f, %.3f, %.2f\n", time, commandValue, a1, a2, a3, a4, scaleValue);
+	sprintf(str, "%lu, %i, %.3f, %.1f, %.3f, %.3f, %.3f, %.2f\n", time, commandValue, RPM, a1, a2, a3, a4, scaleValue);
 	writeToBuffer(str);
 
 }
@@ -395,9 +416,13 @@ void doTestLog() {
 
 	buildTest();
 
-	writeToBuffer("time, motor, t1, t2, volt, amp, thrust\n");
+	writeToBuffer("time, motor, RPM, t1, t2, volt, amp, thrust\n");
 
 	// start the log sampling ISR
+	attachInterrupt(TACH_PIN, tachISR, FALLING);
+	tachTime = 0;
+	lastTachPulse = 60000000*pulsesPerRev; //start tach at 1 rpm
+
 	logSampler.priority(200); // set lowish priority.  We want to let regular fast ISRs (like servo timing) to be able to interrupt
 	logSampler.begin(log, 5000); // start logger, 1000 micros = 1khz, 10000micros = 100hz
 	runCurrentCommand();
@@ -453,6 +478,9 @@ void doTestLog() {
 			commandIndex=0;
 			// kill the log sampling ISR
 			logSampler.end();
+			// kill the tach ISR
+			detachInterrupt(TACH_PIN);
+
 			//flag the current write index as full
 			writeBuffer[writeIndex].full = true;
 		}
