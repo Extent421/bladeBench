@@ -21,6 +21,7 @@ ADC *adc = new ADC();
 ADC::Sync_result ADCresult;
 
 HX711 scale(HX_DAT_PIN, HX_CLK_PIN);
+float scaleCalibrationValue = 392.9;
 
 Servo ESC;
 
@@ -33,7 +34,7 @@ float cValue;
 float correctionFactor = 2.5/(2^16); // ADC to volt. 2.5v external reference
 double scaleValue;
 //double loopCount = 0;
-///double longestLoop = 0;
+double longestLoop = 0;
 elapsedMillis loopTime;
 elapsedMicros testTime;
 elapsedMicros commandTime;
@@ -48,6 +49,8 @@ bool buttonLatch = false;
 bool buttonDown = false;
 
 bool abortTest = false;
+uint8_t abortReason = ABORT_NONE;
+
 
 float motorValue=0;
 
@@ -60,8 +63,11 @@ uint8_t writeIndex = 0;
 uint8_t readIndex = 0;
 unsigned int overrun = 0;
 
-unsigned int commandUpdateRate = 50; // ESC update in hz
-unsigned int commandUpdateRateMicros = (1.0/commandUpdateRate)*1000000;
+uint16_t commandUpdateRate = 333; // ESC update in hz
+uint32_t commandUpdateRateMicros = (1.0/commandUpdateRate)*1000000;
+
+uint16_t sampleRate = 1000; // log sampler rate in hz
+uint32_t sampleRateMicros = (1.0/sampleRate)*1000000;
 
 command commandBuffer[100];
 volatile uint8_t commandIndex = 0;
@@ -82,6 +88,8 @@ void runCurrentCommand() {
 		logSampler.end();
 		commandIndex=0;
 		abortTest=true;
+		abortReason = ABORT_TESTEND;
+
 
 		break;
 	case MODE_RAMP:
@@ -133,6 +141,12 @@ void commandISR(){
 
 void setup() {
 	pinMode(BUTTON_PIN, INPUT_PULLUP);
+	pinMode(TACH_PIN, INPUT);
+	pinMode(T1_PIN, INPUT);
+	pinMode(T2_PIN, INPUT);
+	pinMode(T3_PIN, INPUT);
+	pinMode(VSENSE_PIN, INPUT);
+	pinMode(ISENSE_PIN, INPUT);
 
 	adc->setReference(ADC_REF_EXT, ADC_0);
     adc->setAveraging(16, ADC_0); // set number of averages
@@ -146,10 +160,10 @@ void setup() {
     adc->setConversionSpeed(ADC_MED_SPEED, ADC_1); // change the conversion speed
     adc->setSamplingSpeed(ADC_MED_SPEED  , ADC_1); // change the sampling speed
 
-    adc->enableCompare(1.0/2.5*adc->getMaxValue(ADC_0), 0, ADC_0); // measurement will be ready if value < 1.0V
-    adc->enableCompare(1.0/2.5*adc->getMaxValue(ADC_1), 0, ADC_1); // measurement will be ready if value < 1.0V
-    while (!adc->isComplete(ADC_0)){};
-    while (!adc->isComplete(ADC_1)){};
+    //adc->enableCompare(1.0/2.5*adc->getMaxValue(ADC_0), 0, ADC_0);
+    //adc->enableCompare(1.0/2.5*adc->getMaxValue(ADC_1), 0, ADC_1);
+    //while (!adc->isComplete(ADC_0)){};
+    //while (!adc->isComplete(ADC_1)){};
 
     correctionFactor = 2.5/adc->getMaxValue(ADC_0);
 
@@ -167,7 +181,6 @@ void setup() {
 	for (unsigned int i=0; i<MAXBUFFERS; i++ ) {
 		memset(writeBuffer[i].data, 0, BUFFERSIZE+1);
 	}
-	pinMode(TACH_PIN, INPUT);
 }
 
 void tachISR() {
@@ -240,6 +253,8 @@ void log(){
 	int commandValue;
 	char str[80];
 	unsigned long time;
+	unsigned long endTime;
+	unsigned long totalTime;
 	double RPM=0;
 
 	//check if we're sitting in an overflow state and dump the sample if needed
@@ -251,21 +266,22 @@ void log(){
 	//record the current time for the start of the sample
 	time = testTime;
 	// do some ADC reads
-	// TODO make use of dual synchronous ADC
 	// TODO interleave ADC start and ADC end with rest of sample calcs
 
-	/*
-    ADCresult = adc->analogSynchronizedRead(T1_PIN, T2_PIN);
+
+    //ADCresult = adc->analogSynchronizedRead(T2_PIN, T3_PIN);
+    while (!adc->isComplete()){};
+    ADCresult = adc->readSynchronizedContinuous();
+
+    adc->startSynchronizedSingleRead(ISENSE_PIN, VSENSE_PIN);
     // if using 16 bits and single-ended is necessary to typecast to unsigned,
     // otherwise values larger than 3.3/2 will be interpreted as negative
     a1 = getTemp( (uint16_t)ADCresult.result_adc0 );
     a2 = getTemp( (uint16_t)ADCresult.result_adc1 );
 
-    ADCresult = adc->analogSynchronizedRead(VSENSE_PIN, ISENSE_PIN);
-    a3 = getVolts( (uint16_t)ADCresult.result_adc0 );
-    a4 = getAmps( (uint16_t)ADCresult.result_adc1 );
-	*/
+    //ADCresult = adc->analogSynchronizedRead(ISENSE_PIN, VSENSE_PIN);
 
+    /*
 	rawTemp = (uint16_t)adc->analogRead(T1_PIN, ADC_0);
 	a1 = getTemp(rawTemp);
 	rawTemp = (uint16_t)adc->analogRead(T2_PIN, ADC_0);
@@ -274,7 +290,7 @@ void log(){
 	a3 = getVolts(rawTemp);
 	rawTemp = (uint16_t)adc->analogRead(ISENSE_PIN, ADC_0);
 	a4 = getAmps(rawTemp);
-
+	*/
 	// check the loadcell for updates
 	updateScaleValue();
 
@@ -284,13 +300,27 @@ void log(){
 	//RPM
 	RPM = ((1000000.0/lastTachPulse)/pulsesPerRev )*60;
 
+    while (!adc->isComplete()){};
+    ADCresult = adc->readSynchronizedSingle();
+    adc->startSynchronizedContinuous(T2_PIN, T3_PIN);
+
+    a3 = getVolts( (uint16_t)ADCresult.result_adc1 );
+    a4 = getAmps( (uint16_t)ADCresult.result_adc0 );
+
 	//format the CSV line
-	sprintf(str, "%lu, %i, %.3f, %.1f, %.3f, %.3f, %.3f, %.2f\n", time, commandValue, RPM, a1, a2, a3, a4, scaleValue);
+	sprintf(str, "%lu, %i, %.3f, %.1f, %.1f, %.3f, %.3f, %.2f\n", time, commandValue, RPM, a1, a2, a3, a4, scaleValue);
 	writeToBuffer(str);
+
+	endTime = testTime;
+	totalTime = endTime - time;
+	if (totalTime > longestLoop){
+		longestLoop = totalTime;
+	}
+
 
 }
 
-void writeToBuffer(char* str){
+void writeToBuffer(const char* str){
 	//write the CSV line to the block buffer
 	size_t thisLength;
 	size_t bufferLength;
@@ -320,7 +350,6 @@ void writeToBuffer(char* str){
 		strcat(writeBuffer[writeIndex].data, str);
 	}
 }
-
 
 unsigned int nextBuffer(unsigned int index){
 	// return the next index for the ring buffer
@@ -374,7 +403,6 @@ void loop() {
 			return;
 		}
 
-
 	}
 	char c = tolower(Serial.read());
 
@@ -415,16 +443,19 @@ void doTestLog() {
 	Serial.println("logging...");
 
 	buildTest();
+	abortReason = ABORT_NONE;
 
-	writeToBuffer("time, motor, RPM, t1, t2, volt, amp, thrust\n");
+	logHead();
 
 	// start the log sampling ISR
 	attachInterrupt(TACH_PIN, tachISR, FALLING);
 	tachTime = 0;
-	lastTachPulse = 60000000*pulsesPerRev; //start tach at 1 rpm
+	lastTachPulse = 30000000*pulsesPerRev; //start tach at 1 rpm
 
+	//startup the ADC so it's ready to read on the first sample
+    adc->startSynchronizedContinuous(T2_PIN, T3_PIN);
 	logSampler.priority(200); // set lowish priority.  We want to let regular fast ISRs (like servo timing) to be able to interrupt
-	logSampler.begin(log, 5000); // start logger, 1000 micros = 1khz, 10000micros = 100hz
+	logSampler.begin(log, sampleRateMicros); // start logger
 	runCurrentCommand();
 
 	bool running = true;
@@ -458,6 +489,7 @@ void doTestLog() {
 		if (buttonDown){
 			buttonDown = false;
 			abortTest = true;
+			abortReason = ABORT_USER;
 		}
 		//check for serial abort
 		if (Serial.available()){
@@ -465,6 +497,8 @@ void doTestLog() {
 
 			if (c=='s'){
 				abortTest=true;
+				abortReason = ABORT_USER;
+
 			}
 		}
 
@@ -480,9 +514,18 @@ void doTestLog() {
 			logSampler.end();
 			// kill the tach ISR
 			detachInterrupt(TACH_PIN);
-
+			//add any tail info to the log file
+			logTail();
 			//flag the current write index as full
 			writeBuffer[writeIndex].full = true;
+
+			Serial.print("longest loop ");
+			Serial.print(longestLoop);
+			Serial.print("/");
+			Serial.print(sampleRateMicros);
+			Serial.print(" ");
+			Serial.println((float)longestLoop/sampleRateMicros);
+
 		}
 
 		if ( flushing && (writeBuffer[readIndex].full == false) ){
@@ -508,7 +551,61 @@ void doTestLog() {
 	Serial.println("log completed");
 }
 
-void createLogFile(char logfile[]){
+void logHead(){
+	double ambientTemp;
+	char str[80];
+
+    adc->setAveraging(32, ADC_0); // set number of averages
+	rawTemp = (uint16_t)adc->analogRead(T3_PIN, ADC_0);
+    adc->setAveraging(16, ADC_0); // set number of averages
+
+    ambientTemp = getTemp(rawTemp);
+
+	sprintf(str, "ambient temp: %.1f\n", ambientTemp );
+	writeToBuffer(str);
+	sprintf(str, "pulse per rev: %i\n", pulsesPerRev );
+	writeToBuffer(str);
+	sprintf(str, "loadcell calibration value: %.2f\n", scaleCalibrationValue );
+	writeToBuffer(str);
+	sprintf(str, "command update rate: %i\n", commandUpdateRate );
+	writeToBuffer(str);
+	writeToBuffer("motor: \n");
+	writeToBuffer("ESC: \n");
+	writeToBuffer("settings: \n");
+	writeToBuffer("firmware: \n");
+	writeToBuffer("prop: \n");
+	writeToBuffer("power: \n");
+	writeToBuffer("\n");
+
+	writeToBuffer("Time, Motor Command, RPM, ESC Temp, Motor Temp, Volt, Amp, Thrust\n");
+
+}
+
+void logTail(){
+	char str[80];
+	writeToBuffer("\n");
+
+	switch (abortReason){
+	case ABORT_NONE:
+		break;
+	case ABORT_TESTEND:
+		break;
+	case ABORT_USER:
+		writeToBuffer("Test aborted: user request");
+		break;
+	case ABORT_DANGER:
+		writeToBuffer("Test aborted: emergency stop condition");
+		break;
+	}
+
+	if (overrun > 0 ) {
+		sprintf(str, "dropped samples: %i\n", overrun );
+		writeToBuffer(str);
+	}
+}
+
+
+void createLogFile(const char logfile[]){
 	// TODO actually do something with SD error conditions instead of just ignoring them
 	uint32_t bgnBlock, endBlock;
 
@@ -545,7 +642,7 @@ void createLogFile(char logfile[]){
 	    }
 }
 
-double getTemp(float rawValue){
+double getTemp(const float rawValue){
 	// convert raw ADC reading into temperature in degrees C
 
 	//get absolute voltage
@@ -559,7 +656,7 @@ double getTemp(float rawValue){
 	return cValue;
 }
 
-double getVolts(float rawValue){
+double getVolts(const float rawValue){
 	// convert raw ADC reading into battery voltage
 
 	//get absolute voltage
@@ -570,7 +667,7 @@ double getVolts(float rawValue){
 	return vValue;
 }
 
-double getAmps(float rawValue){
+double getAmps(const float rawValue){
 	// convert raw ADC reading into battery voltage
 
 	//get absolute voltage
@@ -583,7 +680,7 @@ double getAmps(float rawValue){
 
 void setupLoadCell() {
 	// TODO: calibration
-	scale.set_scale(392.9f);          // this value is obtained by calibrating the scale with known weights;
+	scale.set_scale(scaleCalibrationValue);          // this value is obtained by calibrating the scale with known weights;
 	scale.tare(8);				        // reset the scale to 0, 8 samples average
 }
 

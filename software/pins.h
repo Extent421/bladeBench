@@ -5,8 +5,8 @@
 #define TACH_PIN	7
 #define T1_PIN		A0
 #define T2_PIN		A1
-#define T3_PIN		A2
-#define VSENSE_PIN	A3
+#define T3_PIN		A2 //ADC1
+#define VSENSE_PIN	A3 //ADC1
 #define ISENSE_PIN	A6
 #define SC_CS_PIN	SS
 

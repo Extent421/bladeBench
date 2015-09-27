@@ -7,6 +7,11 @@
 #define MODE_RAMP	1	//ramp speed over time
 #define MODE_HOLD	2	//hold steady speed
 
+#define ABORT_NONE		0	//do not abort
+#define ABORT_TESTEND	1	//normal test end
+#define ABORT_USER		2	//user requested abort
+#define ABORT_DANGER	3	//emergency stop condition triggered
+
 const unsigned int BUFFERSIZE = 512; //buffer size for 1 SD block
 
 struct command {
