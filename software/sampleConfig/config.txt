@@ -1,0 +1,4 @@
+commandUpdateRate: 333
+sampleRate: 1000
+tachPulsePerRev: 2
+loadCellCalibration: 392.9

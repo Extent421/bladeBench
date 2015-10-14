@@ -42,6 +42,7 @@ elapsedMicros commandTime;
 elapsedMicros tachTime;
 volatile unsigned long lastTachPulse = 0;
 uint8_t pulsesPerRev = 2;
+volatile bool tachUpdate = false;
 
 elapsedMillis buttonTime;
 bool buttonRunning = false;
@@ -69,7 +70,7 @@ uint32_t commandUpdateRateMicros = (1.0/commandUpdateRate)*1000000;
 uint16_t sampleRate = 1000; // log sampler rate in hz
 uint32_t sampleRateMicros = (1.0/sampleRate)*1000000;
 
-command commandBuffer[100];
+command commandBuffer[COMMANDBUFFER_SIZE];
 volatile uint8_t commandIndex = 0;
 float commandIncrement = 0; //number of microseconds to increment the servo object each command loop
 unsigned long commandMicros = 0; //number of microseconds to run the current command for
@@ -89,8 +90,6 @@ void runCurrentCommand() {
 		commandIndex=0;
 		abortTest=true;
 		abortReason = ABORT_TESTEND;
-
-
 		break;
 	case MODE_RAMP:
 		// reset the command timer
@@ -108,7 +107,6 @@ void runCurrentCommand() {
 		commandIncrement = (float)(commandBuffer[commandIndex].value - commandValue)/updateCount;
 		// kick off the command loop
 		commandTrigger.begin(commandISR, commandUpdateRateMicros);
-
 		break;
 	case MODE_HOLD:
 		ESC.writeMicroseconds(commandBuffer[commandIndex].value);
@@ -120,9 +118,12 @@ void runCurrentCommand() {
 			commandMicros = commandBuffer[commandIndex].time * 1000;
 		}
 		commandTrigger.begin(commandISR, commandMicros);
-
 		break;
-
+	case MODE_TARE:
+		tare();
+		commandIndex++;
+		runCurrentCommand();
+		break;
 	}
 }
 
@@ -149,16 +150,16 @@ void setup() {
 	pinMode(ISENSE_PIN, INPUT);
 
 	adc->setReference(ADC_REF_EXT, ADC_0);
-    adc->setAveraging(16, ADC_0); // set number of averages
+    adc->setAveraging(4, ADC_0); // set number of averages
     adc->setResolution(16, ADC_0); // set bits of resolution
-    adc->setConversionSpeed(ADC_MED_SPEED, ADC_0); // change the conversion speed
-    adc->setSamplingSpeed(ADC_MED_SPEED  , ADC_0); // change the sampling speed
+    adc->setConversionSpeed(ADC_HIGH_SPEED_16BITS, ADC_0); // change the conversion speed
+    adc->setSamplingSpeed(ADC_LOW_SPEED  , ADC_0); // change the sampling speed
 
 	adc->setReference(ADC_REF_EXT, ADC_1);
-    adc->setAveraging(16, ADC_1); // set number of averages
+    adc->setAveraging(4, ADC_1); // set number of averages
     adc->setResolution(16, ADC_1); // set bits of resolution
-    adc->setConversionSpeed(ADC_MED_SPEED, ADC_1); // change the conversion speed
-    adc->setSamplingSpeed(ADC_MED_SPEED  , ADC_1); // change the sampling speed
+    adc->setConversionSpeed(ADC_HIGH_SPEED_16BITS, ADC_1); // change the conversion speed
+    adc->setSamplingSpeed(ADC_LOW_SPEED  , ADC_1); // change the sampling speed
 
     //adc->enableCompare(1.0/2.5*adc->getMaxValue(ADC_0), 0, ADC_0);
     //adc->enableCompare(1.0/2.5*adc->getMaxValue(ADC_1), 0, ADC_1);
@@ -168,19 +169,21 @@ void setup() {
     correctionFactor = 2.5/adc->getMaxValue(ADC_0);
 
 	Serial.begin(115200);
-	if (!sd.begin(SC_CS_PIN, SPI_FULL_SPEED)) {
-		sd.initErrorHalt();
-	}
+
 	delay(1000); // pause for slow serial adaptors
 	ESC.attach(ESC_PIN);  // attaches the servo on pin 9 to the servo object
 	ESC.writeMicroseconds(1001);
 	setupLoadCell();
 
 
+}
+
+void zeroWriteBuffers(){
 	//zero out all of the write buffers
 	for (unsigned int i=0; i<MAXBUFFERS; i++ ) {
 		memset(writeBuffer[i].data, 0, BUFFERSIZE+1);
 	}
+
 }
 
 void tachISR() {
@@ -188,16 +191,22 @@ void tachISR() {
 	time = tachTime;
 	lastTachPulse = time ;
 	tachTime = tachTime - time;
+	tachUpdate = true;
 }
 
-void buildTest(){
+void resetCommandBuffer(){
 	//reset the entire command buffer
-	for (unsigned int i=0; i<100; i++ ) {
+	for (unsigned int i=0; i<COMMANDBUFFER_SIZE; i++ ) {
 		commandBuffer[i].mode = MODE_END;
 		commandBuffer[i].time = 0;
 		commandBuffer[i].value = 0;
 		commandBuffer[i].useMicros = false;
 	}
+}
+
+void buildTest(){
+
+	resetCommandBuffer();
 
 	commandBuffer[0].mode = MODE_HOLD;
 	commandBuffer[0].time = 1000;
@@ -256,6 +265,8 @@ void log(){
 	unsigned long endTime;
 	unsigned long totalTime;
 	double RPM=0;
+	bool scaleUpdated = false;
+	bool rpmUpdated = false;
 
 	//check if we're sitting in an overflow state and dump the sample if needed
 	if (writeBuffer[writeIndex].full==true) {
@@ -268,10 +279,9 @@ void log(){
 	// do some ADC reads
 	// TODO interleave ADC start and ADC end with rest of sample calcs
 
-
-    //ADCresult = adc->analogSynchronizedRead(T2_PIN, T3_PIN);
-    while (!adc->isComplete()){};
-    ADCresult = adc->readSynchronizedContinuous();
+    ADCresult = adc->analogSynchronizedRead(T2_PIN, T3_PIN);
+    ///while (!adc->isComplete()){};
+    ///ADCresult = adc->readSynchronizedContinuous();
 
     adc->startSynchronizedSingleRead(ISENSE_PIN, VSENSE_PIN);
     // if using 16 bits and single-ended is necessary to typecast to unsigned,
@@ -292,24 +302,45 @@ void log(){
 	a4 = getAmps(rawTemp);
 	*/
 	// check the loadcell for updates
-	updateScaleValue();
+	scaleUpdated = updateScaleValue();
 
 	//make note of the current command micros for the ESC
 	commandValue = ESC.readMicroseconds();
 
 	//RPM
-	RPM = ((1000000.0/lastTachPulse)/pulsesPerRev )*60;
+	if(tachUpdate){
+		tachUpdate = false;
+		RPM = ((1000000.0/lastTachPulse)/pulsesPerRev )*60;
+		rpmUpdated = true;
+	}
 
     while (!adc->isComplete()){};
     ADCresult = adc->readSynchronizedSingle();
-    adc->startSynchronizedContinuous(T2_PIN, T3_PIN);
+    ///adc->startSynchronizedContinuous(T2_PIN, T3_PIN);
 
     a3 = getVolts( (uint16_t)ADCresult.result_adc1 );
     a4 = getAmps( (uint16_t)ADCresult.result_adc0 );
 
 	//format the CSV line
-	sprintf(str, "%lu, %i, %.3f, %.1f, %.1f, %.3f, %.3f, %.2f\n", time, commandValue, RPM, a1, a2, a3, a4, scaleValue);
+	sprintf(str, "%lu,%i", time, commandValue);
 	writeToBuffer(str);
+
+	if (rpmUpdated){
+		sprintf(str, ",%.3f", RPM);
+		writeToBuffer(str);
+	}else {
+		writeToBuffer(",");
+	}
+
+	sprintf(str, ",%.1f,%.1f,%.3f,%.3f", a1, a2, a3, a4);
+	writeToBuffer(str);
+
+	if (scaleUpdated){
+		sprintf(str, ",%.2f\n", scaleValue);
+		writeToBuffer(str);
+	}else {
+		writeToBuffer(",\n");
+	}
 
 	endTime = testTime;
 	totalTime = endTime - time;
@@ -424,6 +455,15 @@ void doTestLog() {
 	char c;
 	uint32_t blocksWritten = 0;
 
+	loadConfig();
+	loadProgram();
+	zeroWriteBuffers();
+	writeIndex = 0;
+	readIndex = 0;
+	overrun = 0;
+
+	if (!sd.begin(SC_CS_PIN, SPI_FULL_SPEED)) sd.initErrorHalt();
+
 	//get logfile name
 	char logName[] = "log00.txt";
 	uint8_t nameLength = 3;
@@ -442,7 +482,6 @@ void doTestLog() {
 	createLogFile(logName);
 	Serial.println("logging...");
 
-	buildTest();
 	abortReason = ABORT_NONE;
 
 	logHead();
@@ -450,11 +489,12 @@ void doTestLog() {
 	// start the log sampling ISR
 	attachInterrupt(TACH_PIN, tachISR, FALLING);
 	tachTime = 0;
-	lastTachPulse = 30000000*pulsesPerRev; //start tach at 1 rpm
+	lastTachPulse = 1000000/( (1.0/60) *pulsesPerRev); //start tach at 1 rpm
 
 	//startup the ADC so it's ready to read on the first sample
     adc->startSynchronizedContinuous(T2_PIN, T3_PIN);
 	logSampler.priority(200); // set lowish priority.  We want to let regular fast ISRs (like servo timing) to be able to interrupt
+	testTime = 0; //reset the master timer
 	logSampler.begin(log, sampleRateMicros); // start logger
 	runCurrentCommand();
 
@@ -544,6 +584,8 @@ void doTestLog() {
 					Serial.println("Can't truncate file");
 				}
 			}
+
+			file.close();
 		}
 
 	}
@@ -556,8 +598,8 @@ void logHead(){
 	char str[80];
 
     adc->setAveraging(32, ADC_0); // set number of averages
-	rawTemp = (uint16_t)adc->analogRead(T3_PIN, ADC_0);
-    adc->setAveraging(16, ADC_0); // set number of averages
+	rawTemp = (uint16_t)adc->analogRead(T1_PIN, ADC_0);
+    adc->setAveraging(4, ADC_0); // set number of averages
 
     ambientTemp = getTemp(rawTemp);
 
@@ -681,6 +723,10 @@ double getAmps(const float rawValue){
 void setupLoadCell() {
 	// TODO: calibration
 	scale.set_scale(scaleCalibrationValue);          // this value is obtained by calibrating the scale with known weights;
+	tare();
+}
+
+void tare() {
 	scale.tare(8);				        // reset the scale to 0, 8 samples average
 }
 
@@ -690,9 +736,177 @@ void powerScale() {
 	scale.power_up();
 }
 
-void updateScaleValue() {
+bool updateScaleValue() {
 	// update the global measurement value, but only if the scale is ready to be read
 	if (scale.is_ready()){
 		scaleValue = scale.get_units();
+		return true;
 	}
+	return false;
+}
+
+void setCommandUpdateRate(uint16_t rate){
+	commandUpdateRate = rate; // ESC update in hz
+	commandUpdateRateMicros = (1.0/commandUpdateRate)*1000000;
+}
+
+void setSampleRate(uint16_t rate){
+	sampleRate = rate; // log sampler rate in hz
+	sampleRateMicros = (1.0/sampleRate)*1000000;
+}
+
+int endsWith(const char *str, const char *suffix)
+{
+    if (!str || !suffix)
+        return 0;
+    size_t lenstr = strlen(str);
+    size_t lensuffix = strlen(suffix);
+    if (lensuffix >  lenstr)
+        return 0;
+    return strncmp(str + lenstr - lensuffix, suffix, lensuffix) == 0;
+}
+
+void loadConfig() {
+
+	if (!sd.begin(SC_CS_PIN, SPI_FULL_SPEED)) sd.initErrorHalt();
+
+	  const int line_buffer_size = 256;
+	  char buffer[line_buffer_size];
+
+	  char * propertyValue;
+	  double value;
+
+	  ifstream sdin("config.txt");
+      Serial.println("loading config");
+
+	  while (sdin.getline(buffer, line_buffer_size, '\n') || sdin.gcount()) {
+		  propertyValue=strchr(buffer,':');
+		  if (propertyValue!=NULL) propertyValue++;
+
+		  if (strncmp (buffer,"commandUpdateRate",strlen("commandUpdateRate")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting commandUpdateRate");
+		      setCommandUpdateRate( (uint16_t)value );
+		      continue;
+		    }
+		  if (strncmp (buffer,"sampleRate",strlen("sampleRate")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting sampleRate");
+		      setSampleRate( (uint16_t)value );
+		      continue;
+		    }
+		  if (strncmp (buffer,"tachPulsePerRev",strlen("tachPulsePerRev")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting tachPulsePerRev");
+		      pulsesPerRev = (uint8_t)value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"loadCellCalibration",strlen("loadCellCalibration")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting loadCellCalibration");
+		      scaleCalibrationValue = value;
+		      setupLoadCell();
+		      continue;
+		    }
+	  }
+
+	  sdin.close();
+}
+
+
+void loadProgram() {
+
+	if (!sd.begin(SC_CS_PIN, SPI_FULL_SPEED)) sd.initErrorHalt();
+
+		const int line_buffer_size = 256;
+		char buffer[line_buffer_size];
+
+		char * propertyValue;
+		char * tokenPtr;
+
+		unsigned long cTime = 0;
+		double cValue = 0;
+		bool cUseMicros = false;
+
+		ifstream sdin("program.txt");
+		Serial.println("loading program");
+
+		resetCommandBuffer();
+		unsigned int bufferIndex = 0;
+
+	  while (sdin.getline(buffer, line_buffer_size, '\n') || sdin.gcount()) {
+		  if (bufferIndex >= COMMANDBUFFER_SIZE-1) break; //drop commands if there are too many, always leave room for the end test command.
+		  propertyValue=strchr(buffer,' ');
+		  if (propertyValue!=NULL) propertyValue++;
+
+		  if (strncmp (buffer,"ramp",strlen("ramp")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  tokenPtr = strtok( propertyValue, " ");
+			  if (tokenPtr==NULL) continue;
+			  cValue = atof(tokenPtr);
+			  tokenPtr = strtok( NULL, " ");
+			  if (tokenPtr==NULL) continue;
+			  cTime = strtoul(tokenPtr, NULL, 0);
+
+			  if ( endsWith(tokenPtr,"us") ){
+				cUseMicros = true;
+			  } else if ( endsWith(tokenPtr,"ms") ){
+				cUseMicros = false;
+			  } else { //assume s
+				cUseMicros = false;
+				cTime = cTime * 1000;
+			  }
+				commandBuffer[bufferIndex].mode = MODE_RAMP;
+				commandBuffer[bufferIndex].time = cTime;
+				commandBuffer[bufferIndex].value = 1000 + (1000*(cValue/100));
+				commandBuffer[bufferIndex].useMicros = cUseMicros;
+				bufferIndex++;
+		      continue;
+		  }
+		  if (strncmp (buffer,"hold",strlen("hold")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  tokenPtr = strtok( propertyValue, " ");
+			  if (tokenPtr==NULL) continue;
+			  cValue = atof(tokenPtr);
+			  tokenPtr = strtok( NULL, " ");
+			  if (tokenPtr==NULL) continue;
+			  cTime = strtoul(tokenPtr, NULL, 0);
+
+			  if ( endsWith(tokenPtr,"us") ){
+				cUseMicros = true;
+			  } else if ( endsWith(tokenPtr,"ms") ){
+				cUseMicros = false;
+			  } else { //assume s
+				cUseMicros = false;
+				cTime = cTime * 1000;
+			  }
+				commandBuffer[bufferIndex].mode = MODE_HOLD;
+				commandBuffer[bufferIndex].time = cTime;
+				commandBuffer[bufferIndex].value = 1000 + (1000*(cValue/100));
+				commandBuffer[bufferIndex].useMicros = cUseMicros;
+				bufferIndex++;
+		      continue;
+		    }
+		  if (strncmp (buffer,"tare",strlen("tare")) == 0)
+		    {
+				commandBuffer[bufferIndex].mode = MODE_TARE;
+				commandBuffer[bufferIndex].time = 0;
+				commandBuffer[bufferIndex].value = 0;
+				commandBuffer[bufferIndex].useMicros = false;
+				bufferIndex++;
+				continue;
+		    }
+	  }
+
+	  sdin.close();
 }
