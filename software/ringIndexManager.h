@@ -1,3 +1,6 @@
+#ifndef ringIndexManager_h
+#define ringIndexManager_h
+
 #include <stdint.h>
 
 class ringIndexManager {
@@ -19,3 +22,5 @@ private:
 	volatile uint16_t fillCount = 0;
 
 };
+
+#endif /* ringIndexManager_h */

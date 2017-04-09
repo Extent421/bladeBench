@@ -3,6 +3,7 @@
 #include "ringIndexManager.h"
 #include "ad5272.h"
 #include "dshot.h"
+#include "util.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -72,12 +73,6 @@ volatile bool tachCalibrated = 0;
 volatile bool tachCalibrateRunning = 0;
 uint16_t tachCalibrationCount = 0;
 
-
-elapsedMillis buttonTime;
-bool buttonRunning = false;
-bool buttonLatch = false;
-bool buttonDown = false;
-
 bool abortTest = false;
 uint8_t abortReason = ABORT_NONE;
 
@@ -125,7 +120,6 @@ bool scReading = false;
 void setup() {
 
 
-	pinMode(BUTTON_PIN, INPUT_PULLUP);
 	pinMode(TACH_PIN, INPUT);
 	pinMode(T1_PIN, INPUT);
 	pinMode(T2_PIN, INPUT);
@@ -187,6 +181,40 @@ void setup() {
 
 }
 
+void loop() {
+	//dump anything sitting in the serial buffer
+	while (Serial.read() >= 0) {}
+	Serial.println();
+
+	Serial.println(F("type:"));
+	Serial.println(F("r - run"));
+	Serial.println(F("t - test"));
+
+	//spin while waiting for user input
+	while(!Serial.available()) {
+		handleSerialCommandInput();
+	}
+
+	char c = tolower(Serial.read());
+
+	// Discard extra Serial data.
+	do {
+	delay(10);
+	} while (Serial.read() >= 0);
+
+	if (c == 'r') {
+		loadProgram("program.txt");
+		doTestLog();
+	} else 	if (c == 't') {
+	  testFunc();
+	} else 	if (c == 'e') {
+		Serial5.println("Serial Echo");
+		Serial.println("Serial Echo");
+	}  else {
+	Serial.println(F("Invalid entry"));
+	}
+
+}
 
 void runCurrentCommand() {
 	uint16_t commandValue = 0;
@@ -336,51 +364,6 @@ void adc0_isr(void) {
 	}
 }
 
-void setSamplerADCSettings(){
-	//adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_0);
-	adc->setReference(ADC_REFERENCE::REF_EXT, ADC_0);
-    adc->setAveraging(4, ADC_0); // set number of averages
-    adc->setResolution(16, ADC_0); // set bits of resolution
-    adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS, ADC_0); // change the conversion speed
-    adc->setSamplingSpeed(ADC_SAMPLING_SPEED::VERY_HIGH_SPEED   , ADC_0); // change the sampling speed
-
-	//adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_1);
-	adc->setReference(ADC_REFERENCE::REF_EXT, ADC_1);
-    adc->setAveraging(4, ADC_1); // set number of averages
-    adc->setResolution(16, ADC_1); // set bits of resolution
-    adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS, ADC_1); // change the conversion speed
-    adc->setSamplingSpeed(ADC_SAMPLING_SPEED::VERY_HIGH_SPEED   , ADC_1); // change the sampling speed
-
-    adcMaxValue = adc->getMaxValue(ADC_0);
-
-    adc->enableCompare(adcMaxValue, 0, ADC_0);
-    adc->enableCompare(adcMaxValue, 0, ADC_1);
-    //while (!adc->isComplete(ADC_0)){};
-    //while (!adc->isComplete(ADC_1)){};
-
-    correctionFactor = vRef/adcMaxValue;
-}
-
-void zeroSample(int index){
-	sampleBuffer[index].ready = false;
-	sampleBuffer[index].T1Present = false;
-	sampleBuffer[index].T2Present = false;
-	sampleBuffer[index].T3Present = false;
-	sampleBuffer[index].T4Present = false;
-	sampleBuffer[index].thrustPresent = false;
-	sampleBuffer[index].commandValuePresent = false;
-	sampleBuffer[index].tachPulsePresent = false;
-	sampleBuffer[index].voltsPresent = false;
-	sampleBuffer[index].ampsPresent = false;
-}
-
-void zeroSampleBuffers(){
-	//zero out all of the sample buffers
-	for (unsigned int i=0; i<MAXSAMPLES; i++ ) {
-		zeroSample(i);
-	}
-}
-
 void tachISR() {
 	unsigned long time;
 	time = tachTime;
@@ -448,6 +431,51 @@ void scaleISR() {
 	//when all high priority isrs have finished
 	scaleUpdate.begin(scaleUpdateJob, 1);
 
+}
+
+void setSamplerADCSettings(){
+	//adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_0);
+	adc->setReference(ADC_REFERENCE::REF_EXT, ADC_0);
+    adc->setAveraging(4, ADC_0); // set number of averages
+    adc->setResolution(16, ADC_0); // set bits of resolution
+    adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS, ADC_0); // change the conversion speed
+    adc->setSamplingSpeed(ADC_SAMPLING_SPEED::VERY_HIGH_SPEED   , ADC_0); // change the sampling speed
+
+	//adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_1);
+	adc->setReference(ADC_REFERENCE::REF_EXT, ADC_1);
+    adc->setAveraging(4, ADC_1); // set number of averages
+    adc->setResolution(16, ADC_1); // set bits of resolution
+    adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS, ADC_1); // change the conversion speed
+    adc->setSamplingSpeed(ADC_SAMPLING_SPEED::VERY_HIGH_SPEED   , ADC_1); // change the sampling speed
+
+    adcMaxValue = adc->getMaxValue(ADC_0);
+
+    adc->enableCompare(adcMaxValue, 0, ADC_0);
+    adc->enableCompare(adcMaxValue, 0, ADC_1);
+    //while (!adc->isComplete(ADC_0)){};
+    //while (!adc->isComplete(ADC_1)){};
+
+    correctionFactor = vRef/adcMaxValue;
+}
+
+void zeroSample(int index){
+	sampleBuffer[index].ready = false;
+	sampleBuffer[index].T1Present = false;
+	sampleBuffer[index].T2Present = false;
+	sampleBuffer[index].T3Present = false;
+	sampleBuffer[index].T4Present = false;
+	sampleBuffer[index].thrustPresent = false;
+	sampleBuffer[index].commandValuePresent = false;
+	sampleBuffer[index].tachPulsePresent = false;
+	sampleBuffer[index].voltsPresent = false;
+	sampleBuffer[index].ampsPresent = false;
+}
+
+void zeroSampleBuffers(){
+	//zero out all of the sample buffers
+	for (unsigned int i=0; i<MAXSAMPLES; i++ ) {
+		zeroSample(i);
+	}
 }
 
 void scaleUpdateJob() {
@@ -627,128 +655,6 @@ void getCSVLine(char* str){
 
 
 	strcat(str, "\n");
-
-}
-
-void buttonHandler() {
-
-	if (buttonRunning){ //button is running
-		if ( buttonTime > 2 ) { //if we're over the debounce timer and not latched do the 2nd check
-			if (!digitalRead(BUTTON_PIN)) {  // if it's still triggered trigger the button event and latch
-				buttonDown=true;
-				buttonLatch=true;
-				buttonRunning = false;
-			} else {	// if it's not running then stop running the button
-				buttonRunning = false;
-			}
-		}
-
-	} else { //button is not running
-		if (!digitalRead(BUTTON_PIN)) {//button not running and on
-			if (!buttonLatch){ //if not latched and not running start the button counter
-				buttonRunning = true;
-				buttonTime = 0;
-			}
-		} else { //button not running and off, reset latch
-			buttonLatch = false;
-		}
-	}
-
-}
-
-void runSerialCommand(){
-
-	if (strncmp (serialCommand,"test",strlen("test")) == 0) {
-		Serial.println("got test");
-		testFunc();
-	} else if (strncmp (serialCommand,"run",strlen("run")) == 0) {
-
-		Serial.println("got run");
-		char* fileString = serialCommand + strlen("run");
-		if(strlen(fileString)){
-			loadProgram(fileString);
-		} else {
-			loadProgram("program.txt");
-		}
-
-		doTestLog();
-	} else if (strncmp (serialCommand,"list",strlen("list")) == 0) {
-		Serial.println("got list");
-
-	} else if (strncmp (serialCommand,"runprog",strlen("runprog")) == 0) {
-		Serial.println("got runprog");
-		char* fileString = serialCommand + strlen("runprog");
-		Serial5.print(fileString);
-		Serial5.print(" ");
-		Serial5.println(strlen(fileString));
-
-	}
-
-	memset(serialCommand, 0, 256);
-	serialCommandIndex = 0;
-}
-
-void handleSerialCommandInput(){
-    if (Serial5.available()) {
-    	sChar = Serial5.read();
-    	if (scReading){
-			if (sChar == '>') {
-				scReading = false;
-				runSerialCommand();
-			} else {
-				if (serialCommandIndex < 255){
-					serialCommand[serialCommandIndex]=sChar;
-					serialCommandIndex++;
-				}
-			}
-    	} else {
-			if (sChar == '<') {
-				scReading = true;
-			}
-    	}
-	}
-}
-
-void loop() {
-	//dump anything sitting in the serial buffer
-	while (Serial.read() >= 0) {}
-	Serial.println();
-
-	Serial.println(F("type:"));
-	Serial.println(F("r - run"));
-	Serial.println(F("t - test"));
-
-	//spin while waiting for user input
-	while(!Serial.available()) {
-		handleSerialCommandInput();
-	}
-
-		/*buttonHandler();
-		if (buttonDown){
-			buttonDown = false;
-			doTestLog();
-			return;
-		}*/
-
-
-	char c = tolower(Serial.read());
-
-	// Discard extra Serial data.
-	do {
-	delay(10);
-	} while (Serial.read() >= 0);
-
-	if (c == 'r') {
-		loadProgram("program.txt");
-		doTestLog();
-	} else 	if (c == 't') {
-	  testFunc();
-	} else 	if (c == 'e') {
-		Serial5.println("Serial Echo");
-		Serial.println("Serial Echo");
-	}  else {
-	Serial.println(F("Invalid entry"));
-	}
 
 }
 
@@ -1079,12 +985,6 @@ void doTestLog() {
 		}
 
 
-		buttonHandler();
-		if (buttonDown){
-			buttonDown = false;
-			abortTest = true;
-			abortReason = ABORT_USER;
-		}
 		//check for serial abort
 		if (Serial.available()){
 			c = tolower(Serial.read());
@@ -1316,17 +1216,6 @@ void setSampleRate(uint16_t rate){
 	sampleRateMicros = (1.0/sampleRate)*1000000;
 }
 
-int endsWith(const char *str, const char *suffix)
-{
-    if (!str || !suffix)
-        return 0;
-    size_t lenstr = strlen(str);
-    size_t lensuffix = strlen(suffix);
-    if (lensuffix >  lenstr)
-        return 0;
-    return strncmp(str + lenstr - lensuffix, suffix, lensuffix) == 0;
-}
-
 void loadConfig() {
 	if (!sd.begin()) sd.initErrorHalt("SdFatSdioEX begin failed");
 	sd.chvol();
@@ -1538,3 +1427,58 @@ void loadProgram(char * filename) {
 
 	  sdin.close();
 }
+
+
+void runSerialCommand(){
+
+	if (strncmp (serialCommand,"test",strlen("test")) == 0) {
+		Serial.println("got test");
+		testFunc();
+	} else if (strncmp (serialCommand,"run",strlen("run")) == 0) {
+
+		Serial.println("got run");
+		char* fileString = serialCommand + strlen("run");
+		if(strlen(fileString)){
+			loadProgram(fileString);
+		} else {
+			loadProgram("program.txt");
+		}
+
+		doTestLog();
+	} else if (strncmp (serialCommand,"list",strlen("list")) == 0) {
+		Serial.println("got list");
+
+	} else if (strncmp (serialCommand,"runprog",strlen("runprog")) == 0) {
+		Serial.println("got runprog");
+		char* fileString = serialCommand + strlen("runprog");
+		Serial5.print(fileString);
+		Serial5.print(" ");
+		Serial5.println(strlen(fileString));
+
+	}
+
+	memset(serialCommand, 0, 256);
+	serialCommandIndex = 0;
+}
+
+void handleSerialCommandInput(){
+    if (Serial5.available()) {
+    	sChar = Serial5.read();
+    	if (scReading){
+			if (sChar == '>') {
+				scReading = false;
+				runSerialCommand();
+			} else {
+				if (serialCommandIndex < 255){
+					serialCommand[serialCommandIndex]=sChar;
+					serialCommandIndex++;
+				}
+			}
+    	} else {
+			if (sChar == '<') {
+				scReading = true;
+			}
+    	}
+	}
+}
+

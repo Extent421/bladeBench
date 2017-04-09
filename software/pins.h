@@ -1,4 +1,3 @@
-#define BUTTON_PIN	2
 #define ESC_PIN		9
 // set pin mask for dshot dma.  pin 9 is portC pin 3
 #define ESC_PIN_MASK	1<<3
