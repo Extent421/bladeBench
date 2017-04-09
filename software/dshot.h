@@ -6,6 +6,12 @@
 
 #include "pins.h"
 
+#define DSHOT_COMMAND_LENGTH 16
+#define DSHOT_BUFFER_LENGTH DSHOT_COMMAND_LENGTH+1
+
+#define FTM_PINCFG(pin) FTM_PINCFG2(pin)
+#define FTM_PINCFG2(pin) CORE_PIN ## pin ## _CONFIG
+#define FTM0_CH2_PIN  9
 
 #define FTM_SC_PRESCALE1 0x00
 #define FTM_SC_PRESCALE2 0x01
@@ -28,7 +34,6 @@
 
 #define FTM_SC_OVERFLOW_FLAG 0x80
 
-//
 #define FTM_CSC_DMA 0x01
 
 #define FTM_CSC_PWM_EDGE_HI 0x28

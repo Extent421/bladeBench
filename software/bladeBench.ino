@@ -97,12 +97,14 @@ const byte tempPins[4] = {T1_PIN,T2_PIN,T3_PIN,T4_PIN};
 volatile uint16_t tempValues[4] = {0,0,0,0};
 volatile bool tempUpdate[4] = {false,false,false,false};
 volatile bool tempEnable[4] = {false,false,false,false};
+uint16_t thermBValue = 3435;
 
 uint16_t commandUpdateRate = 333; // ESC update in hz
 uint32_t commandUpdateRateMicros = (1.0/commandUpdateRate)*1000000;
 
-uint16_t idleUpdateRate = 1000; // ESC update in hz
+uint16_t idleUpdateRate = 250; // ESC update in hz  Dshot timeout is 200hz
 uint32_t idleUpdateRateMicros = (1.0/idleUpdateRate)*1000000;
+elapsedMicros commandIdleTime;
 
 uint16_t sampleRate = 1000; // log sampler rate in hz
 uint32_t sampleRateMicros = (1.0/sampleRate)*1000000;
@@ -118,6 +120,73 @@ char sChar;
 char serialCommand[256];
 int serialCommandIndex = 0;
 bool scReading = false;
+
+
+void setup() {
+
+
+	pinMode(BUTTON_PIN, INPUT_PULLUP);
+	pinMode(TACH_PIN, INPUT);
+	pinMode(T1_PIN, INPUT);
+	pinMode(T2_PIN, INPUT);
+	pinMode(T3_PIN, INPUT);
+	pinMode(T4_PIN, INPUT);
+	pinMode(VSENSE_PIN, INPUT);
+	pinMode(ISENSE_PIN, INPUT);
+	pinMode(ISENSE2_PIN, INPUT);
+
+
+	pinMode(ESC_PIN, OUTPUT);
+	digitalWrite(ESC_PIN, 0);
+
+	pinMode(RANGE_3S, OUTPUT);
+	digitalWrite(RANGE_3S, 0);
+	pinMode(RANGE_4S, OUTPUT);
+	digitalWrite(RANGE_4S, 0);
+	pinMode(RANGE_5S, OUTPUT);
+	digitalWrite(RANGE_5S, 0);
+	pinMode(CALIBRATION_SENSE, OUTPUT);
+	digitalWrite(CALIBRATION_SENSE, 0);
+	pinMode(BATTERY_SENSE, OUTPUT);
+	digitalWrite(BATTERY_SENSE, 0);
+
+	Serial.begin(115200);
+	Serial5.begin(115200);
+	//while (!Serial) {	}
+
+	Serial.println("starting up");
+
+	if (!sd.begin()) {
+		Serial.println("SdFatSdioEX begin failed");
+	}
+	sd.chvol();
+
+	setSamplerADCSettings();
+
+    scaleUpdate.priority(240); // set very low priority
+	logSampler.priority(200); // set lowish priority.  We want to let regular fast ISRs (like servo timing) to be able to interrupt
+
+
+	//ESC.attach(ESC_PIN);  // attaches the servo on pin 9 to the servo object
+	//ESC.writeMicroseconds(1001);
+	setupLoadCell();
+
+	Wire2.begin(I2C_MASTER, 0x00, I2C_PINS_3_4, I2C_PULLUP_EXT, 400000);
+	Wire2.setDefaultTimeout(10000); // 10ms
+	enableWiper();
+	setWiper(270);
+
+	memset(serialCommand, 0, 256);
+
+	setupDshotDMA();
+
+	idler.begin(idleISR, idleUpdateRateMicros);
+
+	pinMode(LED_PIN, OUTPUT);
+	digitalWrite(LED_PIN, 1);
+
+}
+
 
 void runCurrentCommand() {
 	uint16_t commandValue = 0;
@@ -228,6 +297,10 @@ void commandISR(){
 	}
 	motorValue += commandIncrement;
 	//ESC.writeMicroseconds(motorValue);
+	if (( motorValue == readDshot() )&( commandIdleTime <= idleUpdateRateMicros )) {
+		return;
+	}
+	commandIdleTime = 0;
 	dshotThrottle(motorValue);
 
 }
@@ -261,72 +334,6 @@ void adc0_isr(void) {
 		tempUpdate[tempIndex.write]=true;
 		tempIndex.nextWrite();
 	}
-}
-
-void setup() {
-
-
-	pinMode(BUTTON_PIN, INPUT_PULLUP);
-	pinMode(TACH_PIN, INPUT);
-	pinMode(T1_PIN, INPUT);
-	pinMode(T2_PIN, INPUT);
-	pinMode(T3_PIN, INPUT);
-	pinMode(T4_PIN, INPUT);
-	pinMode(VSENSE_PIN, INPUT);
-	pinMode(ISENSE_PIN, INPUT);
-	pinMode(ISENSE2_PIN, INPUT);
-
-
-	pinMode(ESC_PIN, OUTPUT);
-	digitalWrite(ESC_PIN, 0);
-
-	pinMode(RANGE_3S, OUTPUT);
-	digitalWrite(RANGE_3S, 0);
-	pinMode(RANGE_4S, OUTPUT);
-	digitalWrite(RANGE_4S, 0);
-	pinMode(RANGE_5S, OUTPUT);
-	digitalWrite(RANGE_5S, 0);
-	pinMode(CALIBRATION_SENSE, OUTPUT);
-	digitalWrite(CALIBRATION_SENSE, 0);
-	pinMode(BATTERY_SENSE, OUTPUT);
-	digitalWrite(BATTERY_SENSE, 0);
-
-	Serial.begin(115200);
-	Serial5.begin(115200);
-	//while (!Serial) {	}
-
-	Serial.println("starting up");
-
-	if (!sd.begin()) {
-		Serial.println("SdFatSdioEX begin failed");
-	}
-	sd.chvol();
-
-	setSamplerADCSettings();
-
-    scaleUpdate.priority(240); // set very low priority
-	logSampler.priority(200); // set lowish priority.  We want to let regular fast ISRs (like servo timing) to be able to interrupt
-
-
-	//ESC.attach(ESC_PIN);  // attaches the servo on pin 9 to the servo object
-	//ESC.writeMicroseconds(1001);
-	setupLoadCell();
-
-	Wire2.begin(I2C_MASTER, 0x00, I2C_PINS_3_4, I2C_PULLUP_EXT, 400000);
-	Wire2.setDefaultTimeout(10000); // 10ms
-	enableWiper();
-	setWiper(270);
-
-	memset(serialCommand, 0, 256);
-
-	setupDshotDMA();
-
-	idler.begin(idleISR, idleUpdateRateMicros);
-
-	pinMode(LED_PIN, OUTPUT);
-	digitalWrite(LED_PIN, 1);
-
-
 }
 
 void setSamplerADCSettings(){
@@ -747,15 +754,33 @@ void loop() {
 
 void testFunc() {
 
-	//checkTempSenors();
-
+	checkTempSenors();
+	pinMode(LED_PIN, OUTPUT);
+	setSamplerADCSettings();
 	elapsedMicros dtime;
 	dtime=0;
 	while(true){
-		dshotOut(48);
-		while (dtime<1500){};
-		dtime=0;
+		if (tempEnable[0]) {
+			uint16_t rawTemp = (uint16_t)adc->analogRead(tempPins[0]);
+			float temp = getTemp(rawTemp);
+			Serial.println(temp);
 
+		}
+		//if( (rawTemp*correctionFactor) > 3.0 ){
+
+		while (dtime<10000){};
+		dtime=0;
+	}
+
+
+	while(true){
+		//dshotThrottle(1046);
+		digitalWriteFast(LED_PIN, 1);
+		dshotOut(1046);
+		digitalWriteFast(LED_PIN, 0);
+
+		while (dtime<100000){};
+		dtime=0;
 	}
 
 	commandTrigger.priority(180);
@@ -1139,6 +1164,8 @@ void logHead(){
 	file.write(str);
 	sprintf(str, "adcMaxValue: %i\n", adcMaxValue );
 	file.write(str);
+	sprintf(str, "thermBValue: %i\n", thermBValue );
+	file.write(str);
 	sprintf(str, "vref: %.2f\n", vRef );
 	file.write(str);
 	file.write("motor: \n");
@@ -1193,12 +1220,11 @@ float getTemp(const float rawValue){
 
 	//get absolute voltage
 	float rawVolt = rawValue*correctionFactor;
-	//get temperature from voltage
 
-	//TMP36
-	//double cValue = ((rawVolt - .750)*100) + 24;
-	//TMP35
-	float cValue = ((rawVolt - .250)*100) + 24;
+	float r = rawVolt/0.0001;
+
+	float kValue = 1/( ( 1/298.15 ) + log(r/10000)/thermBValue );
+	float cValue = kValue - 273.15;
 	return cValue;
 }
 
@@ -1370,6 +1396,15 @@ void loadConfig() {
 		      tachDebounce = (uint16_t)value;
 		      Serial.print("setting tachDebounce ");
 		      Serial.println(tachDebounce);
+		      continue;
+		    }
+		  if (strncmp (buffer,"thermBValue",strlen("thermBValue")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+			  thermBValue = (uint16_t)value;
+		      Serial.print("setting thermBValue ");
+		      Serial.println(thermBValue);
 		      continue;
 		    }
 		  if (strncmp (buffer,"loadCellCalibration",strlen("loadCellCalibration")) == 0)
