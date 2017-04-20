@@ -1447,6 +1447,30 @@ void runSerialCommand(){
 		doTestLog();
 	} else if (strncmp (serialCommand,"list",strlen("list")) == 0) {
 		Serial.println("got list");
+		SdFile file;
+		char name[100];
+
+		if (!sd.begin()) sd.initErrorHalt("SdFatSdioEX begin failed");
+		sd.chvol();
+		sd.vwd()->rewind();
+		Serial5.println("<BeginDirList>");
+
+		while (file.openNext(sd.vwd(), O_READ)) {
+			file.getName(name,100);
+			if (endsWith(name, ".txt")) {
+				if (!((strncmp(name,"config",strlen("config")) == 0)|
+					  (strncmp(name,"log",strlen("log")) == 0))  ) {
+
+					Serial5.print("<");
+					Serial5.print(name);
+					Serial5.println(">");
+				}
+			}
+			file.close();
+
+		}  // end of listing files
+		Serial5.println("<EndDirList>");
+
 
 	} else if (strncmp (serialCommand,"runprog",strlen("runprog")) == 0) {
 		Serial.println("got runprog");
