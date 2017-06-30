@@ -1,0 +1,245 @@
+
+<!DOCTYPE HTML>
+<html>
+ <head>
+  <title>WebSocket console</title>
+  <style>
+   textarea { display: block; }
+  </style>
+  <script>
+    onerror = function (msg) {
+      log(msg);
+    }
+    function log(msg) {
+      var logger = document.getElementById('log');
+      logger.appendChild(document.createTextNode(new Date() + '   ' + msg + '\n'));
+	  logger.scrollTop = logger.scrollHeight;
+	}
+    function logConsole(msg) {
+      var logger = document.getElementById('time');
+      logger.appendChild(document.createTextNode(msg));
+	  logger.scrollTop = logger.scrollHeight;
+	}
+    function status(msg) {
+      log(msg);
+      document.getElementById('status').textContent = msg;
+    }
+    function emptyDirList(){
+        var programlist = document.getElementById('programList');
+		programlist.innerHTML = "";
+    }
+    function buildDirList(msg) {
+    	console.log("got item ");
+    	console.log(msg);
+    	var filename = msg.replace('<', '').replace('>','').trim();
+        var programlist = document.getElementById('programList');
+        var option = document.createElement("option");
+        var txt = document.createTextNode(filename);
+        option.value = filename;
+		option.appendChild(txt);
+        programlist.appendChild(option);
+      }
+    function getSelectedFile(){
+    	var index = document.getElementById('programList').selectedIndex;
+    	if (index<0) return "";
+        return document.getElementById('programList').options[index].value;
+    }
+        </script>
+  <script>
+   var socket;
+   var dirListActive=false;
+   function connect() {
+     var url = document.getElementById('url').value;
+     var protocol = document.getElementById('protocol').value;
+     if (protocol == '')
+       socket = new WebSocket(url);
+     else
+       socket = new WebSocket(url, protocol);
+     status('Connecting to "' + url + '" with protocol "' + protocol + '"...');
+     socket.onopen = function (event) {
+       status('Connected to "' + socket.url + '".');
+     };
+     
+     socket.onmessage = function (event) {
+       //log('RCVD: ' + event.data);
+        	 log('RCVD: ' + event.data);
+        	 if (event.data.startsWith("<BeginDirList>")) {
+				dirListActive = true;
+				emptyDirList();
+				return;
+        	 }
+        	 
+        	 if (dirListActive){
+            	 if (event.data.startsWith("<EndDirList>")) {
+     				dirListActive = false;
+     				return;
+             	 }
+            	 buildDirList(event.data);
+        	 }
+        	 
+        	 logConsole(event.data);
+        	 
+     };
+     
+     socket.onclose = function (event) {
+       status('Disconnected.');
+     };
+   }
+   function disconnect() {
+     if (socket) {
+       status('Disconnecting.');
+       socket.close();
+     } else {
+       log('Not connected.');
+     }
+   }
+   function send() {
+     if (socket) {
+       socket.send(document.getElementById('text').value);
+       log('SENT: ' + document.getElementById('text').value);
+     } else {
+       log('Not connected.');
+     }
+   }
+
+   function sendRun() {
+	     if (socket) {
+	    	 var fileName = getSelectedFile();
+	         socket.send('<run'+fileName+'>');
+	     } else {
+	       log('Not connected.');
+	     }
+	   }
+   function sendTest() {
+	     if (socket) {
+	         socket.send('<test>');
+	         log('SENT: test');
+	     } else {
+	       log('Not connected.');
+	     }
+	   }
+   function sendTare() {
+	     if (socket) {
+	         socket.send('<tare>');
+	         log('SENT: tare');
+	     } else {
+	       log('Not connected.');
+	     }
+	   }
+   function sendTHC() {
+	     if (socket) {
+	         socket.send('<thc>');
+	         log('SENT: thc');
+	     } else {
+	       log('Not connected.');
+	     }
+	   }
+   function sendTLC() {
+	     if (socket) {
+	         socket.send('<tlc>');
+	         log('SENT: tlc');
+	     } else {
+	       log('Not connected.');
+	     }
+	   }
+   function sendTCC() {
+	     if (socket) {
+	         socket.send('<tcc>');
+	         log('SENT: tcc');
+	     } else {
+	       log('Not connected.');
+	     }
+	   }
+   function sendStat() {
+	     if (socket) {
+	         socket.send('<stat>');
+	         log('SENT: stat');
+	     } else {
+	       log('Not connected.');
+	     }
+	   }
+   function sendPing() {
+	     if (socket) {
+	         socket.send('<ping>');
+	         log('SENT: ping');
+	     } else {
+	       log('Not connected.');
+	     }
+	   }
+   function sendList() {
+	     if (socket) {
+	         socket.send('<list>');
+	         log('SENT: list');
+	     } else {
+	       log('Not connected.');
+	     }
+	   }			   
+   function update() {
+     if (socket) {
+       document.getElementById('readyState').textContent = socket.readyState;
+       document.getElementById('bufferedAmount').textContent = socket.bufferedAmount;
+     } else {
+       document.getElementById('readyState').textContent = '-';
+       document.getElementById('bufferedAmount').textContent = '-';
+     }
+   }
+   setInterval(update, 10);
+  </script>
+ </head>
+ <body>
+  <p>Status: <span id="readyState">-</span> <span id="status">Idle</span></p>
+  <p>Buffer: <span id="bufferedAmount">-</span> bytes</p>
+  <p>
+   <label>WebSocket URL: <input id="url" type="url" size="80" value="ws://10.0.2.127:81"></label>
+   <label>Protocol: <input id="protocol" type="text" size="10" value=""></label>
+   <input type=button value="Connect" onclick="connect()">
+   <input type=button value="Disconnect" onclick="disconnect()">
+  </p>
+  <p>
+   <label>Send: <textarea id="text" type="text" rows="4" cols="80"></textarea></label>
+   <input type=button value="Send" onclick="send()">
+   <input type=button value="Ping" onclick="sendPing()">
+  </p>
+  <p>
+   <input type=button value="list" onclick="sendList()">
+   <select id="programList" size="10" >
+	   <option value="program.txt">program.txt</option>
+   </select>
+   <input type=button value="run" onclick="sendRun()">
+   
+  </p>
+  <p></p>
+  <p>
+  <input type=button value="test" onclick="sendTest()">
+  <input type=button value="tare" onclick="sendTare()">
+  <input type=button value="stat" onclick="sendStat()">
+  </p>
+  <p>
+  <input type=button value="tlc" onclick="sendTLC()">
+  <input type=button value="thc" onclick="sendTHC()">
+  <input type=button value="tcc" onclick="sendTCC()">
+  </p>
+
+      <p>reading value: <span id="readingValue">-</span></p>
+      <p>threshold value: <span id="threshValue">-</span></p>
+  
+
+  <table width="800" border="1">
+	<tr>
+      <td>        
+      	<pre>Time:</pre>
+        <textarea rows="25" cols="100" id="time"
+        style="resize: none;" data-role="none"></textarea>
+	  </td>
+    </tr>
+    <tr>
+      <td>
+        <pre>Log:</pre>
+        <textarea rows="25" cols="100" id="log"
+        style="resize: none;" data-role="none"></textarea>
+      </td>
+	</tr>
+ </table>
+
+ </body>
+</html>

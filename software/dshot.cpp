@@ -74,11 +74,13 @@ void dshotOut(uint16_t value){
 	uint16_t packet = 0;
 	uint8_t checksum = 0;
 
-	if (value < 48){
-		value = 48;
+	if (value < 47){
+		value = 47;
 	} else if (value > 2047){
 		value = 2047;
 	}
+
+	//value = value-1;
 
 	packet = value << 1;
 	checksum = getDshotChecksum(packet);

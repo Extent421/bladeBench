@@ -42,10 +42,11 @@ float rawTemp;
 float rawVolt;
 float cValue;
 float correctionFactor = 2.5/(2^16); // ADC to volt. 2.5v external reference
-float scaleValue;
+long scaleValue;
 volatile bool scaleUpdated = false;
 
 //double loopCount = 0;
+uint16_t bounceCount = 0;
 uint16_t longestLoop = 0;
 uint16_t idleTimeMax = 0;
 uint16_t idleTimeMin = 9999;
@@ -67,7 +68,7 @@ uint8_t pulsesPerRev = 2;
 volatile bool tachUpdate = false;
 uint16_t tachDebounce = 0;
 float tachCalibrationData[10];
-unsigned long tachCalibrationTemp[10];
+float tachCalibrationTemp[10];
 ringIndexManager tachCalibrationIndex(2);
 volatile bool tachCalibrated = 0;
 volatile bool tachCalibrateRunning = 0;
@@ -97,12 +98,14 @@ uint16_t thermBValue = 3435;
 uint16_t commandUpdateRate = 333; // ESC update in hz
 uint32_t commandUpdateRateMicros = (1.0/commandUpdateRate)*1000000;
 
-uint16_t idleUpdateRate = 250; // ESC update in hz  Dshot timeout is 200hz
+uint16_t idleUpdateRate = 200; // ESC update in hz  Dshot timeout is 200hz
 uint32_t idleUpdateRateMicros = (1.0/idleUpdateRate)*1000000;
 elapsedMicros commandIdleTime;
 
 uint16_t sampleRate = 1000; // log sampler rate in hz
 uint32_t sampleRateMicros = (1.0/sampleRate)*1000000;
+
+uint16_t tempShutdownValue = 0;
 
 volatile bool samplerActive = false;
 
@@ -145,10 +148,10 @@ void setup() {
 	digitalWrite(BATTERY_SENSE, 0);
 
 	Serial.begin(115200);
-	Serial5.begin(115200);
 	//while (!Serial) {	}
 
 	Serial.println("starting up");
+	Serial5.begin(115200);
 
 	if (!sd.begin()) {
 		Serial.println("SdFatSdioEX begin failed");
@@ -168,7 +171,7 @@ void setup() {
 	Wire2.begin(I2C_MASTER, 0x00, I2C_PINS_3_4, I2C_PULLUP_EXT, 400000);
 	Wire2.setDefaultTimeout(10000); // 10ms
 	enableWiper();
-	setWiper(270);
+	setWiper(350);
 
 	memset(serialCommand, 0, 256);
 
@@ -229,10 +232,8 @@ void runCurrentCommand() {
 
 	switch (commandBuffer[commandIndex].mode){
 	case MODE_END:
-		//ESC.writeMicroseconds(1000);
 		commandTrigger.end();
 		logSampler.end();
-		//dshotOut(48);
 
 		idler.begin(idleISR, idleUpdateRateMicros);
 
@@ -261,8 +262,6 @@ void runCurrentCommand() {
 		commandTrigger.begin(commandISR, commandUpdateRateMicros);
 		break;
 	case MODE_HOLD:
-		//ESC.writeMicroseconds(commandBuffer[commandIndex].value);
-		//dshotOut(commandBuffer[commandIndex].value);
 		commandTime = 0;
 
 		if (commandBuffer[commandIndex].useMicros){
@@ -311,7 +310,7 @@ void testISR(){
 }
 
 void idleISR(){
-	dshotThrottle(1);
+	dshotThrottle(0);
 }
 
 void commandISR(){
@@ -360,6 +359,11 @@ void adc0_isr(void) {
 		//get the temp update
 		tempValues[tempIndex.write]=(uint16_t)adc->adc0->readSingle();
 		tempUpdate[tempIndex.write]=true;
+		if( (tempShutdownValue>0)&&( tempValues[tempIndex.write]>tempShutdownValue) ){
+			//shutdown test
+			abortTest=true;
+			abortReason = ABORT_DANGER;
+		}
 		tempIndex.nextWrite();
 	}
 }
@@ -367,7 +371,10 @@ void adc0_isr(void) {
 void tachISR() {
 	unsigned long time;
 	time = tachTime;
-	if (time < tachDebounce) return;
+	if (time < tachDebounce) {
+		bounceCount++;
+		return;
+	}
 	if (tachCalibrated){
 		tachCalibrationIndex.nextRead();
 		lastTachPulse = time/tachCalibrationData[tachCalibrationIndex.read]; // compensate for partial rotation
@@ -396,7 +403,7 @@ void tachCalibrationISR() {
 
 	tachPulseCount++;
 	if (tachPulseCount >= pulsesPerRev){
-		unsigned long totalPulse = 0;
+		float totalPulse = 0;
 		for(int i=0;i<pulsesPerRev;i++){
 			totalPulse = totalPulse + tachCalibrationTemp[i];
 			//Serial.println(tachCalibrationTemp[i]);
@@ -481,7 +488,8 @@ void zeroSampleBuffers(){
 void scaleUpdateJob() {
 	scaleUpdate.end();
 	detachInterrupt(HX_DAT_PIN); //kill the interrupt before we do any coms on the pin
-	scaleUpdated = updateScaleValue();
+	updateScaleValue();
+	scaleUpdated = true;
 	attachInterrupt(HX_DAT_PIN, scaleISR, FALLING);
 }
 
@@ -499,6 +507,28 @@ void resetCommandBuffer(){
 		commandBuffer[i].value = 0;
 		commandBuffer[i].useMicros = false;
 	}
+}
+
+void vbatAutorange(){
+	digitalWrite(RANGE_3S, 0);
+	digitalWrite(RANGE_4S, 0);
+	digitalWrite(RANGE_5S, 0);
+	digitalWrite(CALIBRATION_SENSE, 0);
+	digitalWrite(BATTERY_SENSE, 1);
+	setSamplerADCSettings();
+
+	delay(1); // let the vsense settle
+	uint16_t raw;
+
+	raw = (uint16_t)adc->analogRead( VSENSE_PIN, ADC_1);
+	if (raw*correctionFactor < 1.2) {
+		digitalWrite(RANGE_3S, 1);
+		Serial5.println("set 3s");
+	} else {
+		Serial5.println("set 6s");
+	}
+	delay(1); // let the vsense settle
+
 }
 
 void checkTempSenors(){
@@ -553,7 +583,7 @@ void getSample(){
 	samplerActive = true;
     adc->startSynchronizedSingleRead(ISENSE_PIN, VSENSE_PIN);
 
-	// check the loadcell for updates
+    // check the loadcell for updates
 
     sampleBuffer[sampleBufferIndex.write].time = time;
 
@@ -658,7 +688,136 @@ void getCSVLine(char* str){
 
 }
 
+void statFunc() {
+	setSamplerADCSettings();
+	digitalWrite(CALIBRATION_SENSE, 0);
+	digitalWrite(BATTERY_SENSE, 1);
+	vbatAutorange();
+
+	float value;
+	Serial5.println("status");
+    ADCresult = adc->analogSynchronizedRead(ISENSE_PIN, VSENSE_PIN);
+    //     adc->startSynchronizedSingleRead(ISENSE_PIN, VSENSE_PIN);
+    value = getVolts( (uint16_t)ADCresult.result_adc1 );
+    Serial5.print("volt ");
+    Serial5.println(value);
+    value = getAmps( (uint16_t)ADCresult.result_adc0 );
+    Serial5.print("amp ");
+    Serial5.println(value);
+
+	scaleValue = scale.get_units();
+    Serial5.print("thust ");
+    Serial5.println(scale.get_units());
+    Serial5.print("thrust raw ");
+    Serial5.println(scale.get_value());
+    byteMap convert;
+
+	convert.slong = scaleValue;
+	Serial5.println(convert.uint8[0],HEX);
+	Serial5.println(convert.uint8[1],HEX);
+	Serial5.println(convert.uint8[2],HEX);
+	Serial5.println(convert.uint8[3],HEX);
+
+}
+
+void tachCalibrateLow() {
+	tachCalibrateLog("TLC");
+}
+void tachCalibrateHigh() {
+	tachCalibrateLog("THC");
+}
+void tachCalibrateDelta() {
+	const int line_buffer_size = 16;
+	char buffer[line_buffer_size];
+
+	uint16_t lowValue = 0;
+	uint16_t highValue = 0;
+	uint16_t thisDelta = 0;
+	uint16_t bigDelta = 0;
+	uint16_t highIndex = 0;
+
+	ifstream tlc("TLC");
+	ifstream thc("THC");
+
+	for (uint16_t i=0; i<800; i++){
+		tlc.getline(buffer, line_buffer_size, '\n');
+		lowValue = atof(buffer);
+		thc.getline(buffer, line_buffer_size, '\n');
+		highValue = atof(buffer);
+		thisDelta = lowValue-highValue;
+
+		Serial.print(i);
+		Serial.print(" ");
+		Serial.println(thisDelta);
+
+		if (thisDelta>bigDelta) {
+			bigDelta = thisDelta;
+			highIndex = i;
+			Serial.print("peak");
+			Serial.print(" ");
+			Serial.print(i);
+			Serial.print(" ");
+			Serial.println(bigDelta);
+		}
+	}
+
+	tlc.close();
+	thc.close();
+
+	Serial.print("tach calibrate value: ");
+	Serial.print(highIndex);
+	Serial.print(" ");
+	Serial.println(bigDelta);
+
+
+}
+
+void tachCalibrateLog(const char logfile[]) {
+	char str[80];
+    uint16_t raw;
+	if (!sd.begin()) sd.initErrorHalt("SdFatSdioEX begin failed");
+	sd.chvol();
+
+    Serial.println("cal start");
+	adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_0);
+	//adc->enableCompare(1.0/3.3*adc->getMaxValue(ADC_0), 0, ADC_0);
+    //while (!adc->isComplete(ADC_0)){};
+    adcMaxValue = adc->getMaxValue(ADC_0);
+    Serial.println("cal mid");
+
+	if (!file.open(logfile, O_WRITE | O_CREAT)) {
+		Serial.print("open failed");
+		return;
+	}
+
+	for (int i; i<800; i++){
+		setWiper(i+100);
+	    raw = (uint16_t)adc->analogRead(TACH_PIN_A);
+
+		sprintf(str, "%i\n", raw );
+		file.write(str);
+	}
+	file.flush();
+	file.close();
+	Serial.print("calibrate log saved ");
+	Serial.println(logfile);
+
+
+}
+
 void testFunc() {
+    uint16_t raw;
+    correctionFactor = 3.3/adcMaxValue;
+
+	while(true){
+		adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_0);
+	    adcMaxValue = adc->getMaxValue(ADC_0);
+	    raw = (uint16_t)adc->analogRead(TACH_PIN_A);
+		Serial.println(raw*correctionFactor);
+		delay(1000);
+	}
+
+	return;
 
 	checkTempSenors();
 	pinMode(LED_PIN, OUTPUT);
@@ -702,7 +861,10 @@ void testFunc() {
 
     correctionFactor = 3.3/adcMaxValue;
 
-    uint16_t raw;
+    //uint16_t raw;
+    raw = (uint16_t)adc->analogRead(TACH_PIN_A);
+	Serial.println(raw*correctionFactor);
+
     /*
 	for (int i; i<800; i++){
 		setWiper(i+100);
@@ -771,6 +933,8 @@ void doTestLog() {
 	char c;
 	uint16_t sampleMask = 0;
 
+	bounceCount = 0;
+
 	digitalWrite(LED_PIN, 0);
 
 	loadConfig();
@@ -812,6 +976,7 @@ void doTestLog() {
 	setSamplerADCSettings();
 	digitalWrite(CALIBRATION_SENSE, 0);
 	digitalWrite(BATTERY_SENSE, 1);
+	vbatAutorange();
 
 	logHead();
 
@@ -911,7 +1076,7 @@ void doTestLog() {
 
 			if (sampleBuffer[sampleBufferIndex.read].thrustPresent){
 				sampleMask |= SAMPLE_THRUST;
-				convert.flt = sampleBuffer[sampleBufferIndex.read].thrust;
+				convert.slong = sampleBuffer[sampleBufferIndex.read].thrust;
 				allSample[byteIndex.write]=convert.uint8[0];
 				byteIndex.nextWrite();
 				allSample[byteIndex.write]=convert.uint8[1];
@@ -1026,6 +1191,20 @@ void doTestLog() {
 			Serial.println(idleTimeMax);
 			Serial.print("max samples ");
 			Serial.println(maxSampleBuffer);
+			Serial.print("bounce count ");
+			Serial.println(bounceCount);
+
+			float calibTotal = 0;
+			for(int i=0;i<10;i++){
+				calibTotal = calibTotal+tachCalibrationData[i];
+				Serial.print(" ");
+				Serial.print(tachCalibrationData[i],6);
+			}
+			Serial.print(" ");
+			Serial.print(calibTotal,6);
+			Serial.println();
+
+
 			if (overrunS > 0) {
 				Serial.print("overS ");
 				Serial.println(overrunS);
@@ -1128,6 +1307,19 @@ float getTemp(const float rawValue){
 	return cValue;
 }
 
+uint16_t getRawFromTemp(const float cValue){
+	float kValue = cValue + 273.15;
+
+	float r = exp( ( 1/kValue - (1/298.15) )*thermBValue )*10000;
+
+	float rawVolt = r*0.0001;
+
+	uint16_t rawValue = rawVolt/(vRef/(2^16));
+
+	return rawValue;
+
+}
+
 float getTMP35Temp(const float rawValue){
 	// convert raw ADC reading into temperature in degrees C
 
@@ -1150,7 +1342,12 @@ float getVolts(const float rawValue){
 	float rawVolt = rawValue*correctionFactor;
 
 	//AttoPilot 90A sensor
-	float vValue = rawVolt*(1.0/0.06369) ;
+	//float vValue = rawVolt*(1.0/0.06369) ;
+	//float calibration = 13.0153255458302; //6s mode
+	float calibration = 5.9652021980316; //3s mode
+
+
+	float vValue = rawVolt*calibration ;
 
 	//allegro 100a divider values
 	// 25.44/1.278   total 26.72
@@ -1168,7 +1365,7 @@ float getAmps(const float rawValue){
 	float rawVolt = rawValue*correctionFactor;
 
 	//AttoPilot 90A sensor
-	float aValue = rawVolt*(1.0/0.0366) ;
+	float aValue = rawVolt*34.5867331938442 + .13;
 
 	//allegro 100a divider values
 	// 20mv/A ,  0amp point 1/2 supply voltage
@@ -1183,6 +1380,7 @@ float getAmps(const float rawValue){
 
 void setupLoadCell() {
 	// TODO: calibration
+	scale.set_gain(128);
 	scale.set_scale(scaleCalibrationValue);          // this value is obtained by calibrating the scale with known weights;
 	tare();
 }
@@ -1199,11 +1397,8 @@ void powerScale() {
 
 bool updateScaleValue() {
 	// update the global measurement value, but only if the scale is ready to be read
-	if (scale.is_ready()){
-		scaleValue = scale.get_units();
-		return true;
-	}
-	return false;
+	scaleValue = scale.get_value();
+	return true;
 }
 
 void setCommandUpdateRate(uint16_t rate){
@@ -1252,10 +1447,11 @@ void loadConfig() {
 		  if (strncmp (buffer,"tachTrigger",strlen("tachTrigger")) == 0)
 		    {
 			  if (propertyValue==NULL) continue;
-			  if (strncmp (propertyValue,"FALLING",strlen("FALLING")) == 0)
+			  Serial.println(propertyValue);
+			  if (strncmp (propertyValue," FALLING",strlen(" FALLING")) == 0)
 			  {
 				  value = FALLING;
-			  } else if (strncmp (propertyValue,"CHANGE",strlen("CHANGE")) == 0)
+			  } else if (strncmp (propertyValue," CHANGE",strlen(" CHANGE")) == 0)
 			  {
 				  value = CHANGE;
 			  } else
@@ -1294,6 +1490,17 @@ void loadConfig() {
 			  thermBValue = (uint16_t)value;
 		      Serial.print("setting thermBValue ");
 		      Serial.println(thermBValue);
+		      continue;
+		    }
+		  if (strncmp (buffer,"tempShutDown",strlen("tempShutDown")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+			  tempShutdownValue = getRawFromTemp( (uint16_t)value );
+		      Serial.print("setting tempShutdownValue ");
+		      Serial.print(value);
+		      Serial.print(" ");
+		      Serial.println(tempShutdownValue);
 		      continue;
 		    }
 		  if (strncmp (buffer,"loadCellCalibration",strlen("loadCellCalibration")) == 0)
@@ -1357,7 +1564,8 @@ void loadProgram(char * filename) {
 			  }
 				commandBuffer[bufferIndex].mode = MODE_RAMP;
 				commandBuffer[bufferIndex].time = cTime;
-				commandBuffer[bufferIndex].value = 1999*(cValue/100)+1;
+				commandBuffer[bufferIndex].value = 2000*(cValue/100);
+				Serial5.println( commandBuffer[bufferIndex].value);
 				commandBuffer[bufferIndex].useMicros = cUseMicros;
 				bufferIndex++;
 		      continue;
@@ -1383,7 +1591,8 @@ void loadProgram(char * filename) {
 				commandBuffer[bufferIndex].mode = MODE_HOLD;
 				commandBuffer[bufferIndex].time = cTime;
 				//commandBuffer[bufferIndex].value = 1000 + (1000*(cValue/100));
-				commandBuffer[bufferIndex].value = 1999*(cValue/100)+1;
+				commandBuffer[bufferIndex].value = 2000*(cValue/100);
+				Serial5.println( commandBuffer[bufferIndex].value);
 				commandBuffer[bufferIndex].useMicros = cUseMicros;
 				bufferIndex++;
 		      continue;
@@ -1409,7 +1618,8 @@ void loadProgram(char * filename) {
 				commandBuffer[bufferIndex].mode = MODE_TACH;
 				commandBuffer[bufferIndex].time = cTime;
 				//commandBuffer[bufferIndex].value = 1000 + (1000*(cValue/100));
-				commandBuffer[bufferIndex].value = 1999*(cValue/100)+1;
+				commandBuffer[bufferIndex].value = 2000*(cValue/100);
+				Serial5.println( commandBuffer[bufferIndex].value);
 				commandBuffer[bufferIndex].useMicros = cUseMicros;
 				bufferIndex++;
 		      continue;
@@ -1434,6 +1644,21 @@ void runSerialCommand(){
 	if (strncmp (serialCommand,"test",strlen("test")) == 0) {
 		Serial.println("got test");
 		testFunc();
+	} else if (strncmp (serialCommand,"stat",strlen("stat")) == 0) {
+		Serial.println("got stat");
+		statFunc();
+	} else if (strncmp (serialCommand,"tare",strlen("tare")) == 0) {
+		Serial.println("got tare");
+		tare();
+	} else if (strncmp (serialCommand,"tlc",strlen("tlc")) == 0) {
+		Serial.println("got tlc");
+		tachCalibrateLow();
+	} else if (strncmp (serialCommand,"thc",strlen("thc")) == 0) {
+		Serial.println("got thc");
+		tachCalibrateHigh();
+	} else if (strncmp (serialCommand,"tcc",strlen("tcc")) == 0) {
+		Serial.println("got tcc");
+		tachCalibrateDelta();
 	} else if (strncmp (serialCommand,"run",strlen("run")) == 0) {
 
 		Serial.println("got run");

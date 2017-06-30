@@ -42,6 +42,7 @@ union byteMap {
 	float flt;
 	int i[2];
 	unsigned long ulong;
+	long slong;
 };
 
 
@@ -56,7 +57,7 @@ struct rawSampleStruct {
 	bool T4Present = false;
 	uint16_t T4 = 0;
 	bool thrustPresent = false;
-	float thrust = 0;
+	long thrust = 0;
 	bool commandValuePresent = false;
 	uint16_t commandValue = 0;
 	bool tachPulsePresent = false;

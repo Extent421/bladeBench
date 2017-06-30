@@ -1,0 +1,105 @@
+<!DOCTYPE HTML>
+<html>
+ <head>
+  <title>BladeBench</title>
+  <link rel="stylesheet" type="text/css" href="mobile.css">
+  <script src="q1Funcs.js"></script>
+  <meta name="viewport" content="width=device-width, user-scalable=no" />
+ </head>
+ <body  onload="pageLoaded()">
+<ul class="tabrow">
+   <li onclick="openTab(event, 'mainPage')" class="selectedTab tabLink leftTab" >Main</li>
+   <span class="rightTab">
+   <li onclick="openTab(event, 'statusPage')" class="tabLink"  >Status</li>
+   <li onclick="openTab(event, 'settingsPage')" class="tabLink" >Settings</li>
+   </span>
+    &nbsp;
+</ul>
+
+
+	<div id="mainPage" class="tabPage" style="display: block;">
+	        <button onclick="connect()" id="connectButton">Connect</button>
+        Status: <span id="readyState">-</span> <span id="status">Idle</span>  
+	
+		<button onclick="mailResult()" id="mailResultsButton">mail result</button>
+		<br />
+		<button onclick="sessionStart()">session start</button>
+		<button onclick="sessionEnd()">session end</button>
+		   
+		<div id="lapContainer">
+			<div id="lapScroll">
+		        <table id="lapTimes">
+		        </table>
+			</div>
+		</div>
+
+    </div>
+    
+
+	<div id="statusPage" class="tabPage" style="display: none;">
+	
+	reading value: <span id="readingValue">-</span>
+	<br />
+	Session: <span id="sessionValue">-</span>
+	<br />
+	WiFi Status: <span id="wifiStatusValue">-</span>
+	<br />
+	WiFi IP: <span id="wifiIPValue">-</span>
+	<br />
+	Low calibrate value: <span id="loCalibrateValue">-</span>
+	<br />
+	Threshold calibrate value: <span id="midCalibrateValue">-</span>
+	<br />
+	High calibrate value: <span id="hiCalibrateValue">-</span>
+	
+	</div>
+    
+    
+    <div id="settingsPage" class="tabPage" style="display: none;">
+	 channel number (in mhz): 
+         <textarea rows="1"  id="channelNumber"
+         style="resize: none;" data-role="none"; onchange ="setChannel()";></textarea>         
+	<br />
+	 Minimum trigger length: 
+         <textarea rows="1"  id="minPulse"
+         style="resize: none;" data-role="none"; onchange ="minPulseChange()";></textarea> 
+	<br />
+	 Session number: 
+         <textarea rows="1"  id="sessionNumber"
+         style="resize: none;" data-role="none"; onchange ="sessionChange()";></textarea> 
+	<br />
+	 Station SSID: 
+         <textarea rows="1"  id="stationSSID"
+         style="resize: none;" data-role="none"; onchange ="StationSSIDChange()";></textarea> 
+	<br />
+	 Station Password: 
+         <textarea rows="1"  id="stationPassword"
+         style="resize: none;" data-role="none"; onchange ="StationPasswordChange()";></textarea> 
+	<br />
+	 AP SSID: 
+	<textarea rows="1"  id="APSSID"
+	style="resize: none;" data-role="none"; onchange ="APSSIDChange()";></textarea> 
+	<br />
+	AP Password: 
+    <textarea rows="1"  id="APPassword"
+    style="resize: none;" data-role="none"; onchange ="APPasswordChange()";></textarea> 
+	<br />
+	<input type="checkbox" id="APMode"; onchange ="APModeChange()">Autoconnect to AP<br>
+	<br />
+
+	 Email address: 
+     <textarea rows="1" cols="40" id="emailAddress"
+     style="resize: none;" data-role="none"; oninput ="emailChange()";></textarea> 
+	<br />
+    <input type=button value="low" onclick="sendCalLow()">
+    <input type=button value="cal threshold" onclick="sendCalThresh()">
+    <input type=button value="high" onclick="sendCalHi()">
+	<br />
+	<label >Voice</label>
+	<select id="voiceOption" onchange="changeVoiceOption()"></select>
+	<br />
+    <input type=button value="Restart" onclick="sendRestart()">
+
+    </div>
+ </body>
+</html>
