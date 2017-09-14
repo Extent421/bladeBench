@@ -140,21 +140,25 @@
             <property name="height_request">26</property>
             <property name="visible">True</property>
             <property name="can_focus">False</property>
-            <property name="active_id">thrust</property>
+            <property name="active_id">Test Thrust</property>
             <items>
-              <item id="thrust" translatable="yes">thrust</item>
-              <item id="thrustFit" translatable="yes">thrust fit</item>
-              <item id="testThrust" translatable="yes">test thrust</item>
-              <item id="load" translatable="yes">load</item>
-              <item id="testRpm" translatable="yes">test rpm</item>
-              <item id="watts" translatable="yes">watts</item>
+              <item id="Thrust Over RPM" translatable="yes">thrust</item>
+              <item id="Thrust Fitline" translatable="yes">thrust fit</item>
+              <item id="Test Thrust" translatable="yes">test thrust</item>
+              <item id="Thrust Over Throttle" translatable="yes">throttle thrust</item>
+              <item id="Load" translatable="yes">load</item>
+              <item id="Test RPM" translatable="yes">Test RPM</item>
+              <item id="Watts" translatable="yes">Watts</item>
               <item id="testRpmRAW" translatable="yes">test rpm RAW</item>
-              <item id="EfficiencyOverRPM" translatable="yes">Efficiency over RPM</item>
-              <item id="V" translatable="yes">V</item>
+              <item id="Efficiency Over RPM" translatable="yes">Efficiency over RPM</item>
+              <item id="Efficiency Over Throttle" translatable="yes">Efficiency over Throttle</item>
+              <item id="Test V" translatable="yes">V</item>
               <item id="VRaw" translatable="yes">V raw</item>
-              <item id="A" translatable="yes">A</item>
+              <item id="Test A" translatable="yes">A</item>
               <item id="ARaw" translatable="yes">A raw</item>
               <item id="T1Raw" translatable="yes">T1 raw</item>
+              <item id="Thrust Over T1" translatable="yes">Thrust over T1</item>
+              <item id="Thrust Over V" translatable="yes">Thrust over V</item>
               <item id="commandRaw" translatable="yes">command Raw</item>
               <item id="overview" translatable="yes">overview</item>
               <item id="stats" translatable="yes">stats</item>

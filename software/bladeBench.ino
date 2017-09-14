@@ -41,7 +41,7 @@ float vRef = 3;
 float rawTemp;
 float rawVolt;
 float cValue;
-float correctionFactor = 2.5/(2^16); // ADC to volt. 2.5v external reference
+float correctionFactor = 2.5/pow(2,16); // ADC to volt. 2.5v external reference
 long scaleValue;
 volatile bool scaleUpdated = false;
 
@@ -182,6 +182,7 @@ void setup() {
 	pinMode(LED_PIN, OUTPUT);
 	digitalWrite(LED_PIN, 1);
 
+
 }
 
 void loop() {
@@ -285,9 +286,13 @@ void runCurrentCommand() {
 		commandTrigger.begin(commandISR, commandUpdateRateMicros);
 		commandIncrement = 0;
 		motorValue = commandBuffer[commandIndex].value;
-		detachInterrupt(TACH_PIN);
-		attachInterrupt(TACH_PIN, tachCalibrationISR, tachTriggerType);
+		//detachInterrupt(TACH_PIN);
+		//attachInterrupt(TACH_PIN, tachCalibrationISR, tachTriggerType);
 		tachCalibrateRunning = true;
+		for(int i=0;i<pulsesPerRev;i++){
+			tachCalibrationData[i] = 1;
+		}
+		tachCalibrated = true;
 
 
 		break;
@@ -359,10 +364,11 @@ void adc0_isr(void) {
 		//get the temp update
 		tempValues[tempIndex.write]=(uint16_t)adc->adc0->readSingle();
 		tempUpdate[tempIndex.write]=true;
-		if( (tempShutdownValue>0)&&( tempValues[tempIndex.write]>tempShutdownValue) ){
+		if( (tempShutdownValue>0)&&( tempValues[tempIndex.write]<tempShutdownValue) ){
 			//shutdown test
 			abortTest=true;
 			abortReason = ABORT_DANGER;
+			Serial.println("temp abort");
 		}
 		tempIndex.nextWrite();
 	}
@@ -457,8 +463,8 @@ void setSamplerADCSettings(){
 
     adcMaxValue = adc->getMaxValue(ADC_0);
 
-    adc->enableCompare(adcMaxValue, 0, ADC_0);
-    adc->enableCompare(adcMaxValue, 0, ADC_1);
+    //adc->enableCompare(adcMaxValue, 0, ADC_0);
+    //adc->enableCompare(adcMaxValue, 0, ADC_1);
     //while (!adc->isComplete(ADC_0)){};
     //while (!adc->isComplete(ADC_1)){};
 
@@ -476,6 +482,8 @@ void zeroSample(int index){
 	sampleBuffer[index].tachPulsePresent = false;
 	sampleBuffer[index].voltsPresent = false;
 	sampleBuffer[index].ampsPresent = false;
+	sampleBuffer[index].calibrate = false;
+	sampleBuffer[index].tachIndex = 0;
 }
 
 void zeroSampleBuffers(){
@@ -532,6 +540,8 @@ void vbatAutorange(){
 }
 
 void checkTempSenors(){
+	//adc->adc0->disableCompare();
+	//adc->adc1->disableCompare();
 	adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_0);
     adc->setAveraging(32, ADC_0); // set number of averages
     adc->setResolution(16, ADC_0); // set bits of resolution
@@ -544,23 +554,33 @@ void checkTempSenors(){
     adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS, ADC_1); // change the conversion speed
     adc->setSamplingSpeed(ADC_SAMPLING_SPEED::HIGH_SPEED  , ADC_1); // change the sampling speed
 
+    adcMaxValue = adc->getMaxValue(ADC_0);
+
     adc->enableCompare(adcMaxValue, 0, ADC_0);
     adc->enableCompare(adcMaxValue, 0, ADC_1);
+	//adc->adc0->wait_for_cal();
+
+    delay(1);
     //while (!adc->isComplete(ADC_0)){};
     //while (!adc->isComplete(ADC_1)){};
-    adcMaxValue = adc->getMaxValue(ADC_0);
 
     correctionFactor = 3.3/adcMaxValue;
 
-	for (unsigned int i=0; i<4; i++ ) {
+    for (unsigned int i=0; i<4; i++ ) {
 		rawTemp = (uint16_t)adc->analogRead(tempPins[i]);
+		Serial.print(rawTemp*correctionFactor);
+		Serial.print(" ");
 		if( (rawTemp*correctionFactor) > 3.0 ){
 			tempEnable[i]=false;
 			Serial.print("disabling ");
+			Serial.print(tempPins[i]);
+			Serial.print(" ");
 			Serial.println(i);
 		} else {
 			tempEnable[i]=true;
 			Serial.print("enabling ");
+			Serial.print(tempPins[i]);
+			Serial.print(" ");
 			Serial.println(i);
 
 		}
@@ -606,7 +626,14 @@ void getSample(){
 		tachUpdate = false;
 		sampleBuffer[sampleBufferIndex.write].tachPulsePresent = true;
 		sampleBuffer[sampleBufferIndex.write].tachPulse = lastTachPulse;
+		sampleBuffer[sampleBufferIndex.write].tachIndex = tachCalibrationIndex.read+1;
+
+		if(tachCalibrateRunning){
+			sampleBuffer[sampleBufferIndex.write].calibrate = true;
+		}
+
 	}
+
 
 	//temp probes
 	if(tempUpdate[0]){
@@ -807,7 +834,12 @@ void tachCalibrateLog(const char logfile[]) {
 
 void testFunc() {
     uint16_t raw;
-    correctionFactor = 3.3/adcMaxValue;
+	checkTempSenors();
+	checkTempSenors();
+	setSamplerADCSettings();
+	checkTempSenors();
+	checkTempSenors();
+    return;
 
 	while(true){
 		adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_0);
@@ -1017,14 +1049,14 @@ void doTestLog() {
 			*/
 
 
-			ringIndexManager byteIndex(32);
+			ringIndexManager byteIndex(33);
 			byteIndex.reset();
 			// advance by 2 to leave room for bitmask
 			byteIndex.nextWrite();
 			byteIndex.nextWrite();
 
 			byteMap convert;
-			uint8_t allSample[28];
+			uint8_t allSample[29];
 			sampleMask = 0;
 
 			sampleMask |= SAMPLE_TIME;
@@ -1058,6 +1090,19 @@ void doTestLog() {
 				byteIndex.nextWrite();
 				allSample[byteIndex.write]=convert.uint8[3];
 				byteIndex.nextWrite();
+
+				if (sampleBuffer[sampleBufferIndex.read].tachIndex > 0){
+					sampleMask |= SAMPLE_TACH_INDEX;
+					allSample[byteIndex.write]=sampleBuffer[sampleBufferIndex.read].tachIndex;
+					byteIndex.nextWrite();
+
+				}
+
+				if(sampleBuffer[sampleBufferIndex.read].calibrate){ // if the tach calibration was running reset the ISR
+					sampleMask |= SAMPLE_CALIBRATE;
+				}
+
+
 			}
 
 			sampleMask |= SAMPLE_VOLT;
@@ -1217,6 +1262,8 @@ void doTestLog() {
 
 	}
 
+    adc->disableInterrupts();
+
 	Serial.println("log completed");
 	digitalWrite(LED_PIN, 1);
 
@@ -1232,7 +1279,7 @@ void logHead(){
 
     ambientTemp = getTemp(rawTemp);
 
-	file.write("log version: 2\n");
+	file.write("log version: 3\n");
 	sprintf(str, "ambient temp: %.1f\n", ambientTemp );
 	file.write(str);
 	sprintf(str, "pulse per rev: %i\n", pulsesPerRev );
@@ -1293,6 +1340,8 @@ float getTemp(const float rawValue){
 
 
 	//Thermistor B value calc for 10k nominal, result in K
+
+	// temp = 1/( ( 1/nominalTemp ) + LOG(resistance/nominalResist)/B )
 	// temp = 1/( ( 1/298.15 ) + LOG(resistance/10000)/B )
 	//convert K to C
 	// C = K - 273.15
@@ -1300,24 +1349,21 @@ float getTemp(const float rawValue){
 	//get absolute voltage
 	float rawVolt = rawValue*correctionFactor;
 
-	float r = rawVolt/0.0001;
+	float r = rawVolt/0.0001;  // resistance from fixed current driver
 
 	float kValue = 1/( ( 1/298.15 ) + log(r/10000)/thermBValue );
 	float cValue = kValue - 273.15;
 	return cValue;
 }
 
+
 uint16_t getRawFromTemp(const float cValue){
 	float kValue = cValue + 273.15;
-
-	float r = exp( ( 1/kValue - (1/298.15) )*thermBValue )*10000;
-
+	float r = exp(((1/kValue) - (1/298.15))*thermBValue)*10000;
 	float rawVolt = r*0.0001;
 
-	uint16_t rawValue = rawVolt/(vRef/(2^16));
-
+	uint16_t rawValue = rawVolt/(vRef/pow(2,16));
 	return rawValue;
-
 }
 
 float getTMP35Temp(const float rawValue){
@@ -1447,7 +1493,6 @@ void loadConfig() {
 		  if (strncmp (buffer,"tachTrigger",strlen("tachTrigger")) == 0)
 		    {
 			  if (propertyValue==NULL) continue;
-			  Serial.println(propertyValue);
 			  if (strncmp (propertyValue," FALLING",strlen(" FALLING")) == 0)
 			  {
 				  value = FALLING;
@@ -1496,7 +1541,7 @@ void loadConfig() {
 		    {
 			  if (propertyValue==NULL) continue;
 			  value = atof(propertyValue);
-			  tempShutdownValue = getRawFromTemp( (uint16_t)value );
+			  tempShutdownValue = getRawFromTemp( value );
 		      Serial.print("setting tempShutdownValue ");
 		      Serial.print(value);
 		      Serial.print(" ");

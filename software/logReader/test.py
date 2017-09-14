@@ -28,21 +28,26 @@ class handler:
 
 	def testPressed(self, button):
 		allCharts = []
-		allLabels= {'thrust':{'x':'RPM', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
-					'thrustFit':{'x':'RPM', 'y':'Thrust', 'yScale':250, 'mode':'line'},
-					'testThrust':{'x':'Time', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
-					'testRpm':{'x':'Time', 'y':'RPM', 'yScale':40000,  'yScaleDelta':600, 'mode':'scatter'},
+		allLabels= {'Thrust Over RPM':{'x':'RPM', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
+					'Thrust Fitline':{'x':'RPM', 'y':'Thrust', 'yScale':250, 'mode':'line'},
+					'Test Thrust':{'x':'Time', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
+					'Thrust Over Throttle':{'x':'Throttle', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
+					'Test RPM':{'x':'Time', 'y':'RPM', 'yScale':40000,  'yScaleDelta':600, 'mode':'scatter'},
 					'testRpmRAW':{'x':'Time', 'y':'RPM', 'yScale':40000,  'yScaleDelta':600, 'mode':'scatter'},
-					'load':{'x':'Time', 'y':'Load', 'yScale':100, 'mode':'scatter'},
-					'watts':{'x':'Watts', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
-					'EfficiencyOverRPM':{'x':'RPM', 'y':'G/W', 'yScale':10, 'mode':'scatter'},
-					'V':{'x':'Time', 'y':'Volts', 'yScale':20, 'mode':'scatter'},
-					'A':{'x':'Time', 'y':'Amps', 'yScale':30, 'mode':'scatter'},
+					'Load':{'x':'Time', 'y':'Load', 'yScale':100, 'mode':'scatter'},
+					'Watts':{'x':'Watts', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
+					'Efficiency Over RPM':{'x':'RPM', 'y':'G/W', 'yScale':10, 'mode':'scatter'},
+					'Efficiency Over Throttle':{'x':'Throttle', 'y':'G/W', 'yScale':10, 'mode':'scatter'},
+					'Test V':{'x':'Time', 'y':'Volts', 'yScale':20, 'mode':'scatter'},
+					'Test A':{'x':'Time', 'y':'Amps', 'yScale':30, 'mode':'scatter'},
 					'overview':{'x':'Time', 'y':'Amps', 'yScale':10, 'mode':'scatter'},
 					'VRaw':{'x':'Time', 'y':'Volts', 'yScale':20, 'mode':'scatter'},
 					'ARaw':{'x':'Time', 'y':'Amps', 'yScale':30, 'mode':'scatter'},
-					'T1Raw':{'x':'Time', 'y':'degrees C', 'yScale':30, 'mode':'scatter'},
+					'T1Raw':{'x':'Time', 'y':'degrees C', 'yScale':30, 'yScaleDelta':20, 'mode':'scatter'},
+					'Thrust Over T1':{'x':'degrees C', 'y':'Thrust', 'yScale':300, 'mode':'scatter'},
+					'Thrust Over V':{'x':'Volts', 'y':'Thrust', 'yScale':300, 'mode':'scatter'},
 					'commandRaw':{'x':'Time', 'y':'Motor Command', 'yScale':2000, 'mode':'line'},
+
 					}
 		mode = self.modeBox.get_active_id()
 
@@ -55,33 +60,41 @@ class handler:
 			if mode == 'stats':
 				resultDict = logReader.getStats(sample,index)
 				return
-			elif mode == 'thrust':
+			elif mode == 'Thrust Over RPM':
 				x,y = logReader.getThrust(sample, index)
-			elif mode == 'thrustFit':
+			elif mode == 'Thrust Fitline':
 				x,y = logReader.getThrustFit(sample, index)
-			elif mode == 'testThrust':
+			elif mode == 'Test Thrust':
 				x,y = logReader.getTestThrust(sample, index)
-			elif mode == 'testRpm':
+			elif mode == 'Thrust Over Throttle':
+				x,y = logReader.getThrottleThrust(sample, index)
+			elif mode == 'Test RPM':
 				x,y = logReader.getTestRpm(sample, index, deltaMode=deltaMode)
 			elif mode == 'testRpmRAW':
 				x,y = logReader.getTestRpmRAW(sample, index, deltaMode=deltaMode)
-			elif mode == 'load':
+			elif mode == 'Load':
 				baseline = logReader.getUnloadedBaseline(self.refPath)
 				x,y = logReader.getLoad(sample, index, baseline)
-			elif mode == 'watts':
+			elif mode == 'Watts':
 				x,y = logReader.getWatts(sample, index)
-			elif mode == 'EfficiencyOverRPM':
+			elif mode == 'Efficiency Over RPM':
 				x,y = logReader.getEfficiencyOverRPM(sample, index)
-			elif mode == 'V':
+			elif mode == 'Efficiency Over Throttle':
+				x,y = logReader.getEfficiencyOverThrottle(sample, index)
+			elif mode == 'Test V':
 				x,y = logReader.getTestVolts(sample, index)
-			elif mode == 'A':
+			elif mode == 'Test A':
 				x,y = logReader.getTestAmps(sample, index)
 			elif mode == 'VRaw':
 				x,y = logReader.getTestVoltsRaw(sample, index)
 			elif mode == 'ARaw':
 				x,y = logReader.getTestAmpsRaw(sample, index)
 			elif mode == 'T1Raw':
-				x,y = logReader.getTestT1Raw(sample, index)
+				x,y = logReader.getTestT1Raw(sample, index, deltaMode=deltaMode)
+			elif mode == 'Thrust Over T1':
+				x,y = logReader.getThrustOverT1(sample, index)
+			elif mode == 'Thrust Over V':
+				x,y = logReader.getThrustOverV(sample, index)
 			elif mode == 'commandRaw':
 				x,y = logReader.getCommandRaw(sample, index)
 			elif mode == 'overview':
@@ -116,7 +129,7 @@ class handler:
 			print 'set Mode to', thisChart['mode']
 			thisChart['extraRange']=False
 			allCharts.append(thisChart)
-		logReader.buildFigure(allCharts, allLabels[mode], deltaMode, self.chartTitleEntry.get_text())
+		logReader.buildFigure(allCharts, allLabels[mode], deltaMode, self.chartTitleEntry.get_text(), mode=mode)
 
 
 

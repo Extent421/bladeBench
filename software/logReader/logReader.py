@@ -49,6 +49,8 @@ SAMPLE_T1 = 1<<6
 SAMPLE_T2 = 1<<7
 SAMPLE_T3 = 1<<8
 SAMPLE_T4 = 1<<9
+SAMPLE_TACH_INDEX = 1<<10
+SAMPLE_CALIBRATE = 1<<11
 
 TIMEROUNDING = 5
 
@@ -62,13 +64,12 @@ def readLog(file):
 
 		floatKeys = ['RPM', 'Volt', 'Amp', 'Thrust']
 		intKeys = ['Motor Command', 'Time']
-		spamreader = csv.DictReader(csvfile, delimiter=',', quotechar='|')
-		smooth = smoother()
+		csv = csv.DictReader(csvfile, delimiter=',', quotechar='|')
 
 		allSamples = []
 		index = {}
 		try:
-			for row in spamreader:
+			for row in csv:
 				thisSample = {}
 
 				if not index.keys():
@@ -108,7 +109,7 @@ def readLog(file):
 def readBinaryLog(file):
 	import struct
 
-	allKeys = ['RPM', 'Volt', 'Amp', 'Thrust','Motor Command', 'Time', 'T1', 'T2', 'T3', 'T4']
+	allKeys = ['RPM', 'RPMIndex', 'calibrate', 'Volt', 'Amp', 'Thrust','Motor Command', 'Time', 'T1', 'T2', 'T3', 'T4', 'autoCalibrate']
 	allSamples = []
 	index = {}
 	for key in allKeys:
@@ -118,6 +119,8 @@ def readBinaryLog(file):
 		adcMax = None
 		vref = None
 		dataStart = None
+		vCalibrationFactor =  5.9652021980316 #3s mode
+
 		for line in iter(f.readline, ''):
 			if 'adcMaxValue:' in line:
 				adcMax = float(line.split(':')[-1])
@@ -125,6 +128,16 @@ def readBinaryLog(file):
 				vref = float(line.split(':')[-1])
 			if 'thermBValue:' in line:
 				thermBValue = float(line.split(':')[-1])
+			if 'pulse per rev:' in line:
+				pulsePerRev = int(line.split(':')[-1])
+			if 'pulse per rev:' in line:
+				pulsePerRev = int(line.split(':')[-1])
+			if 'vrange:' in line:
+				if '6s' in line.split(':')[-1]:
+					vCalibrationFactor =  13.0153255458302 #6s mode
+				else:
+					vCalibrationFactor =  5.9652021980316 #3s mode
+
 			if line == 'Data Start:\n':
 				dataStart = f.tell()
 				break
@@ -169,15 +182,23 @@ def readBinaryLog(file):
 					rpm = (1000000.0/unpacked)*60
 				thisSample['RPM']=rpm
 				index['RPM'].append(len(allSamples))
+			
+			if flags & SAMPLE_TACH_INDEX:
+				data = f.read(1)
+				if not len(data): break
+				unpacked = struct.unpack('<B', data)[0]
+				thisSample['RPMIndex']=unpacked
+				index['RPMIndex'].append(len(allSamples))
+
+			if flags & SAMPLE_CALIBRATE:
+				index['calibrate'].append(len(allSamples))
 
 			if flags & SAMPLE_VOLT:
 				data = f.read(2)
 				if not len(data): break
 				unpacked = struct.unpack('<H', data)[0]
 				adcVolt = unpacked * correctionValue
-				calibrationFactor =  13.0153255458302 #6s mode
-				calibrationFactor =  5.9652021980316 #3s mode
-				sensorVolt = adcVolt * calibrationFactor
+				sensorVolt = adcVolt * vCalibrationFactor
 				thisSample['Volt']=sensorVolt
 				index['Volt'].append(len(allSamples))
 
@@ -257,8 +278,73 @@ def readBinaryLog(file):
 
 			allSamples.append(thisSample)
 
+	#tach calibrate
+	allCalibrateValues = {}
+	for tIndex in index['calibrate']:
+		tachIndex = allSamples[tIndex]['RPMIndex']
+		if tachIndex not in allCalibrateValues:
+			allCalibrateValues[tachIndex]=[]
+		allCalibrateValues[tachIndex].append(allSamples[tIndex]['RPM'])
+	avgValues = {}
+	for tIndex in allCalibrateValues:
+		avgValues[tIndex]=numpy.mean(numpy.array( allCalibrateValues[tIndex][2:-2] ))
+	allAvg = numpy.mean(numpy.array( avgValues.values() ))
+	tachCorrection = {}
+	for tIndex in avgValues:
+		tachCorrection[tIndex]=allAvg/avgValues[tIndex]
+	#print 'raw', allCalibrateValues
+	#print 'index avg', avgValues
+	#print 'all avg', allAvg
+	#print 'tach calibration list', tachCorrection
+
+
+
+	#test calibrate
+	calibrateValues = {}
+	indexList = []
+	valueList = []
+	for sampleIndex in index['RPM']:
+		rpm = allSamples[sampleIndex]['RPM']
+		thisIndex = allSamples[sampleIndex]['RPMIndex']
+		indexList.append( thisIndex )
+		valueList.append( rpm )
+		if len(indexList)> pulsePerRev:
+			indexList.pop(0)
+			valueList.pop(0)
+
+		thisValue = numpy.mean(numpy.array( valueList ))
+		thisError = thisValue/rpm
+
+		index['autoCalibrate'].append(sampleIndex)
+		allSamples[sampleIndex]['autoCalibrate']=thisError
+
+		if (thisError <0.9) or (thisError > 1.1):
+			continue
+		if set(range(1,pulsePerRev+1)) ==  set(indexList):
+			if thisIndex not in calibrateValues.keys():
+				calibrateValues[thisIndex]=[]
+			calibrateValues[thisIndex].append(thisError)
+
+
+	print 'calib min max med mean'
+	for cIndex in calibrateValues:
+		r=calibrateValues[cIndex]
+		print cIndex, min(r), max(r), (numpy.median(numpy.array( r ))), (numpy.mean(numpy.array( r )))
+	#apply calibration values
+	for tIndex in index['RPM']:
+
+		tachIndex = allSamples[tIndex]['RPMIndex']
+		if tachIndex in tachCorrection.keys():
+			allSamples[tIndex]['RPMRaw']=(allSamples[tIndex]['RPM']/pulsePerRev)
+			allSamples[tIndex]['RPM']=(allSamples[tIndex]['RPM']/pulsePerRev)*numpy.mean(numpy.array( calibrateValues[tachIndex] ))    
+
+
+
 	#interpolate
 	for key in index:
+		if key == 'RPMIndex' : continue
+		if key == 'calibrate' : continue
+
 		seq = index[key]
 		for a, b in zip(seq, seq[1:]):
 			length = b-a
@@ -339,17 +425,19 @@ def getWatts(sample, index):
 	x = []
 	y = []
 
-	smoothV = smoother(avgTaps=6, medTaps=1)
-	smoothA = smoother(avgTaps=6, medTaps=1)
+	smoothV = smoother(avgTaps=24, medTaps=1)
+	smoothA = smoother(avgTaps=24, medTaps=1)
 	smoothT = smoother(avgTaps=6, medTaps=3)
-	#sample, index = readLog('D:\\prop\\1304\\rotorX3020.txt')
-	for sampleIndex in index['Thrust']:
-		thrust = sample[sampleIndex]['Thrust']
+	for sampleIndex in index['Volt']:
+
 		volt = sample[sampleIndex]['Volt']
 		amp = sample[sampleIndex]['Amp']
-
 		smoothV.add( volt )
 		smoothA.add( amp )
+
+		if sampleIndex not in index['Thrust']: continue
+
+		thrust = sample[sampleIndex]['Thrust']
 		smoothT.add ( thrust )
 		watts = round(smoothV.get()*smoothA.get()  , 1 )
 
@@ -362,22 +450,54 @@ def getEfficiencyOverRPM(sample, index):
 	x = []
 	y = []
 
-	smoothV = smoother(avgTaps=6, medTaps=1)
-	smoothA = smoother(avgTaps=6, medTaps=1)
+	smoothV = smoother(avgTaps=24, medTaps=1)
+	smoothA = smoother(avgTaps=24, medTaps=1)
 	smoothT = smoother(avgTaps=6, medTaps=3)
-	for sampleIndex in index['Thrust']:
-		thrust = sample[sampleIndex]['Thrust']
+	for sampleIndex in index['Volt']:
+
 		volt = sample[sampleIndex]['Volt']
 		amp = sample[sampleIndex]['Amp']
-		rpm = sample[sampleIndex]['RPM']
-
 		smoothV.add( volt )
 		smoothA.add( amp )
+
+		if sampleIndex not in index['Thrust']: continue
+
+		thrust = sample[sampleIndex]['Thrust']
 		smoothT.add ( thrust )
+		rpm = sample[sampleIndex]['RPM']
+
 		watts = round(smoothV.get()*smoothA.get()  , 1 )
 		if not watts: continue
 		y.append(round(smoothT.get(), 2)/watts )
 		x.append(rpm)
+
+	return x, y
+
+def getEfficiencyOverThrottle(sample, index):
+	x = []
+	y = []
+
+	smoothV = smoother(avgTaps=24, medTaps=1)
+	smoothA = smoother(avgTaps=24, medTaps=1)
+	smoothT = smoother(avgTaps=6, medTaps=3)
+	for sampleIndex in index['Volt']:
+
+		volt = sample[sampleIndex]['Volt']
+		amp = sample[sampleIndex]['Amp']
+		smoothV.add( volt )
+		smoothA.add( amp )
+
+		if sampleIndex not in index['Thrust']: continue
+
+		thrust = sample[sampleIndex]['Thrust']
+		smoothT.add ( thrust )
+
+		throttle = sample[sampleIndex]['Motor Command']
+
+		watts = round(smoothV.get()*smoothA.get()  , 1 )
+		if not watts: continue
+		y.append(round(smoothT.get(), 2)/watts )
+		x.append(throttle)
 
 	return x, y
 
@@ -391,7 +511,7 @@ def getThrust(sample, index):
 		rpm = sample[sampleIndex]['RPM']
 		time = sample[sampleIndex]['Time']
 		thrust = sample[sampleIndex]['Thrust']
-		if rpm > 45000: continue
+		if rpm > 60000: continue
 		if not rpm: continue
 		smooth.add( rpm )
 		smoothedValue = round(smooth.get(), 3 )
@@ -443,19 +563,33 @@ def getTestThrust(sample, index):
 		y.append(smoothedValue)
 	return x, y
 
+def getThrottleThrust(sample, index):
+	# thrust / RPM
+	x = []
+	y = []
+	smooth = smoother(avgTaps=1, medTaps=3)
+	for sampleIndex in index['Thrust']:
+		throttle = sample[sampleIndex]['Motor Command']
+		thrust = sample[sampleIndex]['Thrust']
+		smooth.add( thrust )
+		smoothedValue =  round(smooth.get(), 3 )
+		x.append(throttle )
+		y.append(smoothedValue)
+	return x, y
+
 def getTestRpm(sample, index, deltaMode=False):
 	# thrust / RPM
 	x = []
 	y = []
-	smooth = smoother(avgTaps=4, medTaps=1)
-	dsmooth = smoother(avgTaps=2, medTaps=6)
+	smooth = smoother(avgTaps=2, medTaps=1)
+	dsmooth = smoother(avgTaps=2, medTaps=1)
 
 	lastGoodTime = 0
 	lastValue = 0
 	for sampleIndex in index['RPM']:
 		time = sample[sampleIndex]['Time']
 		rpm = sample[sampleIndex]['RPM']
-		if rpm > 60000: 
+		if rpm > 65000: 
 			print 'False Trigger', lastGoodTime, time, time-lastGoodTime
 			continue
 		x.append(round(float(time)/1000000, TIMEROUNDING) )
@@ -470,9 +604,22 @@ def getTestRpm(sample, index, deltaMode=False):
 			y.append(thisValue)
 	return x, y
 
+
+def getTestRpmError(sample, index, deltaMode=False):
+	x = []
+	y = []
+
+	for sampleIndex in index['autoCalibrate']:
+		time = sample[sampleIndex]['Time']
+		volt = sample[sampleIndex]['autoCalibrate']
+		x.append(round(float(time)/1000000, TIMEROUNDING) )
+		y.append(volt)
+	return x, y
+
 def getTestVoltsRaw(sample, index):
 	x = []
 	y = []
+
 	for sampleIndex in index['Volt']:
 		time = sample[sampleIndex]['Time']
 		volt = sample[sampleIndex]['Volt']
@@ -480,14 +627,47 @@ def getTestVoltsRaw(sample, index):
 		y.append(volt)
 	return x, y
 
-def getTestT1Raw(sample, index):
+def getTestT1Raw(sample, index, deltaMode=False):
 	x = []
 	y = []
+	lastGoodTime = 0
+	lastValue = 0
+	dsmooth = smoother(avgTaps=70, medTaps=1)
+
 	for sampleIndex in index['T1']:
 		time = sample[sampleIndex]['Time']
 		T1 = sample[sampleIndex]['T1']
 		x.append(round(float(time)/1000000, TIMEROUNDING) )
-		y.append(T1)
+
+
+		if deltaMode:
+			dsmooth.add( 1000*(float(T1-lastValue)/(float(time-lastGoodTime)/1000))  )
+			y.append( dsmooth.get() )
+			lastGoodTime = time
+			lastValue = T1
+		else:
+			y.append(T1)
+
+	return x, y
+
+def getThrustOverT1(sample, index):
+	x = []
+	y = []
+	for sampleIndex in index['Thrust']:
+		T1 = sample[sampleIndex]['T1']
+		thrust = sample[sampleIndex]['Thrust']
+		x.append(T1 )
+		y.append(thrust)
+	return x, y
+
+def getThrustOverV(sample, index):
+	x = []
+	y = []
+	for sampleIndex in index['Thrust']:
+		volt = sample[sampleIndex]['Volt']
+		thrust = sample[sampleIndex]['Thrust']
+		x.append(volt )
+		y.append(thrust)
 	return x, y
 
 def getCommandRaw(sample, index):
@@ -514,7 +694,7 @@ def getTestVolts(sample, index):
 	x = []
 	y = []
 
-	smooth = smoother(avgTaps=1, medTaps=6)
+	smooth = smoother(avgTaps=24, medTaps=6)
 	lastTime = 0
 	for sampleIndex in index['Volt']:
 		time = sample[sampleIndex]['Time']
@@ -530,7 +710,7 @@ def getTestAmps(sample, index):
 	x = []
 	y = []
 
-	smooth = smoother(avgTaps=1, medTaps=6)
+	smooth = smoother(avgTaps=24, medTaps=6)
 	lastTime = 0
 	for sampleIndex in index['Amp']:
 		time = sample[sampleIndex]['Time']
@@ -574,20 +754,21 @@ def getLoad(sample, index, unloadedRPM):
 		value = sample[sampleIndex]['RPM']
 		time = sample[sampleIndex]['Time']
 
-		if value > 45000: continue
+		if value > 60000: continue
 		x.append(round(float(time)/1000000, TIMEROUNDING) )
 		smooth.add( value )
 		smootedValue = round(smooth.get(), 3 )
+		if sampleIndex >= len(unloadedRPM): continue
 		if unloadedRPM[sampleIndex]==None: continue 
 		y.append(100- (smootedValue/unloadedRPM[sampleIndex])*100 )
 	return x, y
 
 def getUnloadedBaseline(logPath):
-	sample, index = readLog(logPath)
+	sample, index = readBinaryLog(logPath)
 
 	unloadedRPM = [None]*len(sample)
 	unloadedIndex = []
-	smooth = smoother(avgTaps=10, medTaps=8)
+	smooth = smoother(avgTaps=4, medTaps=1)
 	for sampleIndex in index['RPM']:
 		value = sample[sampleIndex]['RPM']
 
@@ -599,19 +780,30 @@ def getUnloadedBaseline(logPath):
 	getInterpolated(unloadedIndex, unloadedRPM)
 	return unloadedRPM
 
-def buildFigure(dataList, labelList, deltaMode, chartTitle=None):
-	colors = ['steelblue', 'teal', 'indigo', 'greenyellow', 'gray', 'fuchsia', 'yellow', 'black', 'purple', 'orange', 'blue', 'green','red']
+def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None):
+	colors = ['steelblue', 'teal', 'indigo', 'greenyellow', 'gray', 'fuchsia', 'yellow', 'black', 'purple', 'orange', 'green', 'blue','red']
 	xLabel = labelList['x']
 	yLabel = labelList['y']
 	yScale = labelList['yScale']
 	if deltaMode:
 		yScale = labelList['yScaleDelta']
+	
+	deltaString = ''
+	if deltaMode:
+		deltaString = ' - Delta'
+
+	outputFile = './output/'+mode+deltaString+'.html'
+	outputTitle = mode+deltaString
+	if chartTitle:
+		outputTitle = chartTitle
+
+	output_file( outputFile, title=outputTitle, mode='inline' )
 
 	hover = HoverTool(
 		tooltips = [
 			#("index", "$index"),
 			(xLabel, "@x{1.11}"),
-			(yLabel, "@y{int}"),
+			(yLabel, "@y{1.11}"),
 		],
 		#mode='vline',
 
@@ -624,7 +816,7 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None):
 		y_range=[0, yScale],
 		x_axis_label=xLabel,# y_axis_label=yLabel,
 		webgl=True,
-		title=chartTitle
+		title=outputTitle
 	)
 	
 

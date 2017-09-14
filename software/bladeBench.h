@@ -24,6 +24,8 @@
 #define SAMPLE_T2			1<<7
 #define SAMPLE_T3			1<<8
 #define SAMPLE_T4			1<<9
+#define SAMPLE_TACH_INDEX	1<<10
+#define SAMPLE_CALIBRATE	1<<11
 
 
 const unsigned int COMMANDBUFFER_SIZE = 100; //buffer for benchmark commands
@@ -62,6 +64,8 @@ struct rawSampleStruct {
 	uint16_t commandValue = 0;
 	bool tachPulsePresent = false;
 	unsigned long tachPulse=0;
+	uint8_t tachIndex=0;
+	bool calibrate = false;
 	bool voltsPresent = false;
 	uint16_t volts = 0;
 	bool ampsPresent = false;
