@@ -5,6 +5,7 @@ import urlparse
 import os
 import sys
 import time
+import json
 
 sys.path.insert(0, os.path.abspath(".."))
 from . import logReader
@@ -27,15 +28,22 @@ class handler:
 		Gtk.main_quit(*args)
 
 	def testPressed(self, button):
+		patchLoad = None
 		allCharts = []
-		allLabels= {'Thrust Over RPM':{'x':'RPM', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
-					'Thrust Fitline':{'x':'RPM', 'y':'Thrust', 'yScale':250, 'mode':'line'},
-					'Test Thrust':{'x':'Time', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
+		allLabels= {'Thrust Over RPM':{'x':'RPM', 'y':'Thrust g', 'yScale':250, 'mode':'scatter'},
+					'Thrust Fitline':{'x':'RPM', 'y':'Thrust g', 'yScale':250, 'mode':'line'},
+					'Test Thrust':{'x':'Time', 'y':'Thrust g', 'yScale':250, 'mode':'scatter'},
+					'Test Torque':{'x':'Time', 'y':'Torque Ncm', 'yScale':10, 'mode':'scatter'},
+					'Test Watts':{'x':'Time', 'y':'Watts', 'yScale':250, 'mode':'scatter'},
 					'Thrust Over Throttle':{'x':'Throttle', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
+					'RPM Over Throttle':{'x':'Throttle', 'y':'RPM', 'yScale':40000, 'mode':'scatter'},
 					'Test RPM':{'x':'Time', 'y':'RPM', 'yScale':40000,  'yScaleDelta':600, 'mode':'scatter'},
 					'testRpmRAW':{'x':'Time', 'y':'RPM', 'yScale':40000,  'yScaleDelta':600, 'mode':'scatter'},
 					'Load':{'x':'Time', 'y':'Load', 'yScale':100, 'mode':'scatter'},
 					'Watts':{'x':'Watts', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
+					'MechPower':{'x':'Watts', 'y':'Time', 'yScale':250, 'mode':'scatter'},
+					'Torque Over RPM':{'x':'RPM', 'y':'Torque Ncm', 'yScale':10, 'mode':'scatter'},
+					'MechEff':{'x':'Time', 'y':'Efficiency', 'yScale':1, 'mode':'scatter'},
 					'Efficiency Over RPM':{'x':'RPM', 'y':'G/W', 'yScale':10, 'mode':'scatter'},
 					'Efficiency Over Throttle':{'x':'Throttle', 'y':'G/W', 'yScale':10, 'mode':'scatter'},
 					'Test V':{'x':'Time', 'y':'Volts', 'yScale':20, 'mode':'scatter'},
@@ -54,9 +62,22 @@ class handler:
 		for row in self.fileList:
 			path = row['fullPath'][1:]
 			label = row['label']
+			programName = None
+			z=None
+
+			if '.patch' in path:
+				patchFile = open(path, 'r')
+				patchLoad = json.load(patchFile)
+				patchFile.close()
+				continue
+
+
 			sample, index = logReader.readBinaryLog(path)
 			deltaMode = self.deltaCheck.get_active()
 			print 'charting for ', mode
+
+
+
 			if mode == 'stats':
 				resultDict = logReader.getStats(sample,index)
 				return
@@ -66,10 +87,17 @@ class handler:
 				x,y = logReader.getThrustFit(sample, index)
 			elif mode == 'Test Thrust':
 				x,y = logReader.getTestThrust(sample, index)
+			elif mode == 'Test Torque':
+				x,y = logReader.getTestThrust(sample, index)
+				y = [v*100 for v in y]  #Nm to Ncm
 			elif mode == 'Thrust Over Throttle':
 				x,y = logReader.getThrottleThrust(sample, index)
+			elif mode == 'RPM Over Throttle':
+				x,y = logReader.getRpmOverThrottle(sample, index)
 			elif mode == 'Test RPM':
 				x,y = logReader.getTestRpm(sample, index, deltaMode=deltaMode)
+			elif mode == 'Test Watts':
+				x,y = logReader.getTestWatts(sample, index)
 			elif mode == 'testRpmRAW':
 				x,y = logReader.getTestRpmRAW(sample, index, deltaMode=deltaMode)
 			elif mode == 'Load':
@@ -77,6 +105,13 @@ class handler:
 				x,y = logReader.getLoad(sample, index, baseline)
 			elif mode == 'Watts':
 				x,y = logReader.getWatts(sample, index)
+			elif mode == 'MechPower':
+				x,y = logReader.getMechanicalPower(sample, index)
+			elif mode == 'MechEff':
+				x,y = logReader.getMechanicalEff(sample, index)
+			elif mode == 'Torque Over RPM':
+				x,y,z,programName = logReader.getTorqueOverRPM(sample, index)
+				y = [v*100 for v in y]  #Nm to Ncm
 			elif mode == 'Efficiency Over RPM':
 				x,y = logReader.getEfficiencyOverRPM(sample, index)
 			elif mode == 'Efficiency Over Throttle':
@@ -124,12 +159,14 @@ class handler:
 			thisChart = {}
 			thisChart['x']=x
 			thisChart['y']=y
+			thisChart['z']=z
+			thisChart['programName']=programName
 			thisChart['label']=label
 			thisChart['mode']=allLabels[mode]['mode']
 			print 'set Mode to', thisChart['mode']
 			thisChart['extraRange']=False
 			allCharts.append(thisChart)
-		logReader.buildFigure(allCharts, allLabels[mode], deltaMode, self.chartTitleEntry.get_text(), mode=mode)
+		logReader.buildFigure(allCharts, allLabels[mode], deltaMode, self.chartTitleEntry.get_text(), mode=mode, patchLoad=patchLoad)
 
 
 

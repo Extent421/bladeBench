@@ -2,6 +2,9 @@
 // set pin mask for dshot dma.  pin 9 is portC pin 3
 #define ESC_PIN_MASK	1<<3
 
+#define AUXSERVO_PIN		10
+
+
 #define HX_CLK_PIN	5
 #define HX_DAT_PIN	6
 #define TACH_PIN	7
@@ -22,4 +25,5 @@
 
 #define LED_PIN		13
 
+//address for digipot
 #define DPADDRESS   47

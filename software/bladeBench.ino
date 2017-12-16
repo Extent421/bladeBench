@@ -8,10 +8,11 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "Servo.h"
+
 #include "HX711.h"
 #include <SPI.h>
 #include <SdFat.h>
-#include <Servo.h>
 #include <ADC.h>
 #include <i2c_t3.h>
 
@@ -29,6 +30,7 @@ HX711 scale(HX_DAT_PIN, HX_CLK_PIN);
 float scaleCalibrationValue = 392.9;
 
 Servo ESC;
+Servo AUX;
 
 IntervalTimer logSampler;
 IntervalTimer scaleUpdate;
@@ -79,6 +81,7 @@ uint8_t abortReason = ABORT_NONE;
 
 
 float motorValue=0;
+float auxValue=0;
 
 const uint16_t MAXSAMPLES = 4000; //number of blocks in the ring buffer
 
@@ -102,6 +105,13 @@ uint16_t idleUpdateRate = 200; // ESC update in hz  Dshot timeout is 200hz
 uint32_t idleUpdateRateMicros = (1.0/idleUpdateRate)*1000000;
 elapsedMicros commandIdleTime;
 
+uint16_t auxCommandRate = 50; // Aux servo update in hz
+uint32_t auxCommandRateMicros = (1.0/auxCommandRate)*1000000;
+uint16_t auxMinUsec = 1000;
+uint16_t auxMaxUsec = 1500;
+
+
+
 uint16_t sampleRate = 1000; // log sampler rate in hz
 uint32_t sampleRateMicros = (1.0/sampleRate)*1000000;
 
@@ -112,12 +122,17 @@ volatile bool samplerActive = false;
 command commandBuffer[COMMANDBUFFER_SIZE];
 volatile uint8_t commandIndex = 0;
 float commandIncrement = 0; //number of microseconds to increment the servo object each command loop
+float command2Increment = 0; //number of microseconds to increment the servo object each command loop
 unsigned long commandMicros = 0; //number of microseconds to run the current command for
+
+char* loadedProgram;
 
 char sChar;
 char serialCommand[256];
 int serialCommandIndex = 0;
 bool scReading = false;
+
+bool useDshot = false;
 
 
 void setup() {
@@ -135,6 +150,11 @@ void setup() {
 
 	pinMode(ESC_PIN, OUTPUT);
 	digitalWrite(ESC_PIN, 0);
+	pinMode(ESC_PIN, OUTPUT);
+	digitalWrite(ESC_PIN, 0);
+
+	pinMode(AUXSERVO_PIN, OUTPUT);
+	digitalWrite(AUXSERVO_PIN, 0);
 
 	pinMode(RANGE_3S, OUTPUT);
 	digitalWrite(RANGE_3S, 0);
@@ -164,8 +184,6 @@ void setup() {
 	logSampler.priority(200); // set lowish priority.  We want to let regular fast ISRs (like servo timing) to be able to interrupt
 
 
-	//ESC.attach(ESC_PIN);  // attaches the servo on pin 9 to the servo object
-	//ESC.writeMicroseconds(1001);
 	setupLoadCell();
 
 	Wire2.begin(I2C_MASTER, 0x00, I2C_PINS_3_4, I2C_PULLUP_EXT, 400000);
@@ -175,7 +193,13 @@ void setup() {
 
 	memset(serialCommand, 0, 256);
 
-	setupDshotDMA();
+	if(useDshot){
+		setupDshotDMA();
+	} else {
+		ESC.attach(ESC_PIN, 125, 250);  // attaches the servo on pin 9 to the servo object as oneshot protocol
+		ESC.setRefreshUsec(2000);
+		ESC.writeCommand(0);
+	}
 
 	idler.begin(idleISR, idleUpdateRateMicros);
 
@@ -245,8 +269,6 @@ void runCurrentCommand() {
 	case MODE_RAMP:
 		// reset the command timer
 		commandTime = 0;
-		//motorValue = ESC.readMicroseconds();
-		motorValue = readDshot();
 
 		// grab the total length of the command
 		if (commandBuffer[commandIndex].useMicros){
@@ -255,10 +277,18 @@ void runCurrentCommand() {
 			commandMicros = commandBuffer[commandIndex].time * 1000;
 		}
 		// pre-calculate the ESC increment for each command loop
-		//commandValue = ESC.readMicroseconds();
-		commandValue = readDshot();
+		if (useDshot) {
+			commandValue = readDshot();
+		} else {
+			commandValue = ESC.readCommand();
+		}
+		motorValue = commandValue;
 		updateCount = commandMicros/commandUpdateRateMicros;
 		commandIncrement = (float)(commandBuffer[commandIndex].value - commandValue)/updateCount;
+		if (commandBuffer[commandIndex].value2 > -1) {
+			command2Increment = (float)((auxMinUsec + (commandBuffer[commandIndex].value2/2000.0)*(auxMaxUsec-auxMinUsec)) - auxValue)/updateCount;
+		}
+
 		// kick off the command loop
 		commandTrigger.begin(commandISR, commandUpdateRateMicros);
 		break;
@@ -273,6 +303,10 @@ void runCurrentCommand() {
 		commandTrigger.begin(commandISR, commandUpdateRateMicros);
 		commandIncrement = 0;
 		motorValue = commandBuffer[commandIndex].value;
+		if (commandBuffer[commandIndex].value2 > -1) {
+			auxValue = auxMinUsec + (commandBuffer[commandIndex].value2/2000.0)*(auxMaxUsec-auxMinUsec) ;
+		}
+		command2Increment = 0;
 
 		break;
 	case MODE_TACH:
@@ -297,9 +331,13 @@ void runCurrentCommand() {
 
 		break;
 	case MODE_TARE:
+		commandTime = 0;
+		commandMicros = 250 * 1000;
 		tare();
-		commandIndex++;
-		runCurrentCommand();
+		commandTrigger.begin(commandISR, commandUpdateRateMicros);
+
+		//commandIndex++;
+		//runCurrentCommand();
 		break;
 	}
 }
@@ -315,25 +353,32 @@ void testISR(){
 }
 
 void idleISR(){
-	dshotThrottle(0);
+	if (useDshot) {
+		dshotThrottle(0);
+	}
+
 }
 
 void commandISR(){
 	if( commandTime > commandMicros ){
 		// this command has run over its end time, make sure the final value is set and then advance
-		//ESC.writeMicroseconds(commandBuffer[commandIndex].value);
-		//motorValue = commandBuffer[commandIndex].value;
 		commandIndex++;
 		runCurrentCommand();
 		//return;
 	}
 	motorValue += commandIncrement;
-	//ESC.writeMicroseconds(motorValue);
-	if (( motorValue == readDshot() )&( commandIdleTime <= idleUpdateRateMicros )) {
-		return;
+	auxValue += command2Increment;
+	AUX.writeMicroseconds(auxValue);
+	if (useDshot) {
+		dshotThrottle(motorValue);
+		if (( motorValue == readDshot() )&( commandIdleTime <= idleUpdateRateMicros )) {
+			return;
+		}
+
+	} else {
+		ESC.writeCommand( motorValue );
 	}
 	commandIdleTime = 0;
-	dshotThrottle(motorValue);
 
 }
 
@@ -383,7 +428,7 @@ void tachISR() {
 	}
 	if (tachCalibrated){
 		tachCalibrationIndex.nextRead();
-		lastTachPulse = time/tachCalibrationData[tachCalibrationIndex.read]; // compensate for partial rotation
+		lastTachPulse = time;// /tachCalibrationData[tachCalibrationIndex.read]; // compensate for partial rotation
 		tachTime = tachTime - time; //reset the tach timer from when the initial time was captured
 		tachUpdate = true;
 	} else {
@@ -416,7 +461,7 @@ void tachCalibrationISR() {
 
 		}
 
-		if (tachCalibrated){ //update calibration data with running averate
+		if (tachCalibrated){ //update calibration data with running average
 			//Serial.println("--");
 			for(int i=0;i<pulsesPerRev;i++){
 				float thisResult = (float)tachCalibrationTemp[i]/totalPulse;
@@ -513,6 +558,7 @@ void resetCommandBuffer(){
 		commandBuffer[i].mode = MODE_END;
 		commandBuffer[i].time = 0;
 		commandBuffer[i].value = 0;
+		commandBuffer[i].value2 = -1;
 		commandBuffer[i].useMicros = false;
 	}
 }
@@ -613,12 +659,17 @@ void getSample(){
 		sampleBuffer[sampleBufferIndex.write].thrust = scaleValue;
 	}
 
-	if (getDshotUpdated()){
-		resetDshotUpdated();
-		//make note of the current command micros for the ESC
+
+	if (useDshot) {
+		if (getDshotUpdated()){
+			resetDshotUpdated();
+			//make note of the current command micros for the ESC
+			sampleBuffer[sampleBufferIndex.write].commandValuePresent = true;
+			sampleBuffer[sampleBufferIndex.write].commandValue = readDshot();
+		}
+	} else {
 		sampleBuffer[sampleBufferIndex.write].commandValuePresent = true;
-		//sampleBuffer[sampleBufferIndex.write].commandValue = ESC.readMicroseconds();
-		sampleBuffer[sampleBufferIndex.write].commandValue = readDshot();
+		sampleBuffer[sampleBufferIndex.write].commandValue = ESC.readCommand();
 	}
 
 	//RPM
@@ -716,13 +767,23 @@ void getCSVLine(char* str){
 }
 
 void statFunc() {
+	uint16_t raw = 0;
+	float value;
+
+	Serial5.println("status");
+
+	adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_0);
+    adcMaxValue = adc->getMaxValue(ADC_0);
+
+	raw = (uint16_t)adc->analogRead(TACH_PIN_A);
+    Serial5.print("Tach sense ");
+    Serial5.println( (float)raw/adcMaxValue );
+
 	setSamplerADCSettings();
 	digitalWrite(CALIBRATION_SENSE, 0);
 	digitalWrite(BATTERY_SENSE, 1);
 	vbatAutorange();
 
-	float value;
-	Serial5.println("status");
     ADCresult = adc->analogSynchronizedRead(ISENSE_PIN, VSENSE_PIN);
     //     adc->startSynchronizedSingleRead(ISENSE_PIN, VSENSE_PIN);
     value = getVolts( (uint16_t)ADCresult.result_adc1 );
@@ -734,16 +795,14 @@ void statFunc() {
 
 	scaleValue = scale.get_units();
     Serial5.print("thust ");
-    Serial5.println(scale.get_units());
+    Serial5.println(scale.get_units(),4);
     Serial5.print("thrust raw ");
     Serial5.println(scale.get_value());
     byteMap convert;
 
-	convert.slong = scaleValue;
-	Serial5.println(convert.uint8[0],HEX);
-	Serial5.println(convert.uint8[1],HEX);
-	Serial5.println(convert.uint8[2],HEX);
-	Serial5.println(convert.uint8[3],HEX);
+
+
+
 
 }
 
@@ -780,21 +839,21 @@ void tachCalibrateDelta() {
 		if (thisDelta>bigDelta) {
 			bigDelta = thisDelta;
 			highIndex = i;
-			Serial.print("peak");
-			Serial.print(" ");
-			Serial.print(i);
-			Serial.print(" ");
-			Serial.println(bigDelta);
+			Serial5.print("peak");
+			Serial5.print(" ");
+			Serial5.print(i);
+			Serial5.print(" ");
+			Serial5.println(bigDelta);
 		}
 	}
 
 	tlc.close();
 	thc.close();
 
-	Serial.print("tach calibrate value: ");
-	Serial.print(highIndex);
-	Serial.print(" ");
-	Serial.println(bigDelta);
+	Serial5.print("tach calibrate value: ");
+	Serial5.print(highIndex);
+	Serial5.print(" ");
+	Serial5.println(bigDelta);
 
 
 }
@@ -826,9 +885,8 @@ void tachCalibrateLog(const char logfile[]) {
 	}
 	file.flush();
 	file.close();
-	Serial.print("calibrate log saved ");
-	Serial.println(logfile);
-
+	Serial5.print("calibrate log saved ");
+	Serial5.println(logfile);
 
 }
 
@@ -1209,9 +1267,12 @@ void doTestLog() {
 		if (abortTest){ //trigger the end of the test
 			abortTest=false;
 			// reset the ESC and kill the command ISR
-			//ESC.writeMicroseconds(1000);
+			if (useDshot){
+				idler.begin(idleISR, idleUpdateRateMicros);
+			} else {
+				ESC.writeCommand(0);
+			}
 			commandTrigger.end();
-			idler.begin(idleISR, idleUpdateRateMicros);
 
 			//reset the command program to the beginning
 			commandIndex=0;
@@ -1300,7 +1361,10 @@ void logHead(){
 	file.write("firmware: \n");
 	file.write("prop: \n");
 	file.write("power: \n");
+	sprintf(str, "loaded program: %s\n", loadedProgram );
+	file.write(str);
 	file.write("\n");
+
 
 	file.write("Time,Motor Command,RPM,Volt,Amp,Thrust,T1,T2,T3,T4\n");
 	file.write("Data Start:\n");
@@ -1452,6 +1516,21 @@ void setCommandUpdateRate(uint16_t rate){
 	commandUpdateRateMicros = (1.0/commandUpdateRate)*1000000;
 }
 
+void setAuxCommandRate(uint16_t rate){
+	auxCommandRate = rate; // ESC update in hz
+	auxCommandRateMicros = (1.0/auxCommandRate)*1000000;
+	AUX.attach(AUXSERVO_PIN);
+	AUX.writeMicroseconds(1001);
+}
+
+void setAuxMinUsec(uint16_t usec){
+	auxMinUsec = usec;
+}
+
+void setAuxMaxUsec(uint16_t usec){
+	auxMaxUsec = usec;
+}
+
 void setSampleRate(uint16_t rate){
 	sampleRate = rate; // log sampler rate in hz
 	sampleRateMicros = (1.0/sampleRate)*1000000;
@@ -1480,6 +1559,30 @@ void loadConfig() {
 			  value = atof(propertyValue);
 		      Serial.println("setting commandUpdateRate");
 		      setCommandUpdateRate( (uint16_t)value );
+		      continue;
+		    }
+		  if (strncmp (buffer,"auxCommandRate",strlen("auxCommandRate")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting auxCommandRate");
+		      setAuxCommandRate( (uint16_t)value );
+		      continue;
+		    }
+		  if (strncmp (buffer,"auxMinUsec",strlen("auxMinUsec")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting auxMinUsec");
+		      setAuxMinUsec( (uint16_t)value );
+		      continue;
+		    }
+		  if (strncmp (buffer,"auxMaxUsec",strlen("auxMaxUsec")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting auxMaxUsec");
+		      setAuxMaxUsec( (uint16_t)value );
 		      continue;
 		    }
 		  if (strncmp (buffer,"sampleRate",strlen("sampleRate")) == 0)
@@ -1557,6 +1660,17 @@ void loadConfig() {
 		      setupLoadCell();
 		      continue;
 		    }
+		  if (strncmp (buffer,"tachSensitivity",strlen("tachSensitivity")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting tachSensitivity");
+		      setWiper(value);
+		      continue;
+		    }
+
+
+
 	  }
 
 	  sdin.close();
@@ -1572,9 +1686,11 @@ void loadProgram(char * filename) {
 
 		char * propertyValue;
 		char * tokenPtr;
+		char * midTokenPtr;
 
 		unsigned long cTime = 0;
 		float cValue = 0;
+		float cValue2 = -1;
 		bool cUseMicros = false;
 
 		Serial5.print("loading program ");
@@ -1595,10 +1711,24 @@ void loadProgram(char * filename) {
 			  tokenPtr = strtok( propertyValue, " ");
 			  if (tokenPtr==NULL) continue;
 			  cValue = atof(tokenPtr);
-			  tokenPtr = strtok( NULL, " ");
-			  if (tokenPtr==NULL) continue;
-			  cTime = strtoul(tokenPtr, NULL, 0);
 
+			  //store next value pointer
+			  midTokenPtr = strtok( NULL, " ");
+			  if (tokenPtr==NULL) continue;
+
+			  //check for 3rd value.
+			  tokenPtr = strtok( NULL, " ");
+			  if (tokenPtr==NULL) {
+				  //If it doesn't exist pass the previous token value along for time parsing
+				  tokenPtr = midTokenPtr;
+				  cValue2 = -1;
+
+			  } else {
+				  //If it exists assume dual servo output command
+				  cValue2 = atof(midTokenPtr);
+			  }
+
+			  cTime = strtoul(tokenPtr, NULL, 0);
 			  if ( endsWith(tokenPtr,"us") ){
 				cUseMicros = true;
 			  } else if ( endsWith(tokenPtr,"ms") ){
@@ -1607,9 +1737,15 @@ void loadProgram(char * filename) {
 				cUseMicros = false;
 				cTime = cTime * 1000;
 			  }
+
 				commandBuffer[bufferIndex].mode = MODE_RAMP;
 				commandBuffer[bufferIndex].time = cTime;
 				commandBuffer[bufferIndex].value = 2000*(cValue/100);
+				if (cValue2 > -1){
+					commandBuffer[bufferIndex].value2 = 2000*(cValue2/100);
+				} else {
+					commandBuffer[bufferIndex].value2 = -1;
+				}
 				Serial5.println( commandBuffer[bufferIndex].value);
 				commandBuffer[bufferIndex].useMicros = cUseMicros;
 				bufferIndex++;
@@ -1621,10 +1757,24 @@ void loadProgram(char * filename) {
 			  tokenPtr = strtok( propertyValue, " ");
 			  if (tokenPtr==NULL) continue;
 			  cValue = atof(tokenPtr);
-			  tokenPtr = strtok( NULL, " ");
-			  if (tokenPtr==NULL) continue;
-			  cTime = strtoul(tokenPtr, NULL, 0);
 
+			  //store next value pointer
+			  midTokenPtr = strtok( NULL, " ");
+			  if (tokenPtr==NULL) continue;
+
+			  //check for 3rd value.
+			  tokenPtr = strtok( NULL, " ");
+			  if (tokenPtr==NULL) {
+				  //If it doesn't exist pass the previous token value along for time parsing
+				  tokenPtr = midTokenPtr;
+				  cValue2 = -1;
+
+			  } else {
+				  //If it exists assume dual servo output command
+				  cValue2 = atof(midTokenPtr);
+			  }
+
+			  cTime = strtoul(tokenPtr, NULL, 0);
 			  if ( endsWith(tokenPtr,"us") ){
 				cUseMicros = true;
 			  } else if ( endsWith(tokenPtr,"ms") ){
@@ -1637,6 +1787,11 @@ void loadProgram(char * filename) {
 				commandBuffer[bufferIndex].time = cTime;
 				//commandBuffer[bufferIndex].value = 1000 + (1000*(cValue/100));
 				commandBuffer[bufferIndex].value = 2000*(cValue/100);
+				if (cValue2 > -1){
+					commandBuffer[bufferIndex].value2 = 2000*(cValue2/100);
+				} else {
+					commandBuffer[bufferIndex].value2 = -1;
+				}
 				Serial5.println( commandBuffer[bufferIndex].value);
 				commandBuffer[bufferIndex].useMicros = cUseMicros;
 				bufferIndex++;
@@ -1708,6 +1863,7 @@ void runSerialCommand(){
 
 		Serial.println("got run");
 		char* fileString = serialCommand + strlen("run");
+		loadedProgram = fileString;
 		if(strlen(fileString)){
 			loadProgram(fileString);
 		} else {
@@ -1776,3 +1932,6 @@ void handleSerialCommandInput(){
 	}
 }
 
+uint16_t commandToPWM( uint16_t commandValue){
+	return ( (commandValue/2)+1000 );
+}

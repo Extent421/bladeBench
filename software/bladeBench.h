@@ -34,6 +34,7 @@ struct command {
 	uint8_t mode = 0;
 	unsigned long time = 0;
 	uint16_t value = 0;
+	int16_t value2 = -1;
 	bool useMicros = false;
 };
 
