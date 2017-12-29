@@ -7,6 +7,8 @@ import sys
 import time
 import json
 
+import shutil
+
 sys.path.insert(0, os.path.abspath(".."))
 from . import logReader
 
@@ -29,6 +31,7 @@ class handler:
 
 	def testPressed(self, button):
 		patchLoad = None
+		propCharts = []
 		allCharts = []
 		allLabels= {'Thrust Over RPM':{'x':'RPM', 'y':'Thrust g', 'yScale':250, 'mode':'scatter'},
 					'Thrust Fitline':{'x':'RPM', 'y':'Thrust g', 'yScale':250, 'mode':'line'},
@@ -63,7 +66,8 @@ class handler:
 			path = row['fullPath'][1:]
 			label = row['label']
 			programName = None
-			z=None
+			extraData=None
+			deltaMode = self.deltaCheck.get_active()
 
 			if '.patch' in path:
 				patchFile = open(path, 'r')
@@ -71,9 +75,39 @@ class handler:
 				patchFile.close()
 				continue
 
+			if '.prop' in path:
+				propFile = open(path, 'r')
+				propLoad = json.load(propFile)
+				propFile.close()
+				propCharts.append(propLoad)
+				x = []
+				y = []
+				z = []
+
+				print 'loaded prop'
+				for item in propLoad:
+					print item
+					x.append( item['rpm'])
+					y.append( item['torque'])
+					z.append( item['thrust'])
+
+				extraData = {}
+				extraData['z'] = z
+
+				thisChart = {}
+				thisChart['x']=x
+				thisChart['y']=y
+				thisChart['extraData']=extraData
+				thisChart['programName']='prop'
+				thisChart['label']='propLabel'
+				thisChart['mode']='line'
+				thisChart['extraRange']=False
+				allCharts.append(thisChart)
+
+				continue
+
 
 			sample, index = logReader.readBinaryLog(path)
-			deltaMode = self.deltaCheck.get_active()
 			print 'charting for ', mode
 
 
@@ -110,7 +144,7 @@ class handler:
 			elif mode == 'MechEff':
 				x,y = logReader.getMechanicalEff(sample, index)
 			elif mode == 'Torque Over RPM':
-				x,y,z,programName = logReader.getTorqueOverRPM(sample, index)
+				x,y,extraData,programName = logReader.getTorqueOverRPM(sample, index)
 				y = [v*100 for v in y]  #Nm to Ncm
 			elif mode == 'Efficiency Over RPM':
 				x,y = logReader.getEfficiencyOverRPM(sample, index)
@@ -154,30 +188,44 @@ class handler:
 				allCharts.append(thisChart)
 
 				x,y = logReader.getTestAmps(sample, index)
+			elif mode == 'rename':
+				fullProgramName = sample[0]['programName']
+				programName = fullProgramName.split('.')[0]
+				dir = os.path.dirname(path)
+				targetPath = os.path.join(dir, programName+'.txt')
+				increment = 0
+				while os.path.isfile(targetPath):
+					increment = increment + 1
+					targetPath = os.path.join(dir, programName+'('+ str(increment) +').txt')
+					if increment >100: break
 
+				print 'copying from', path, 'to', targetPath
+				shutil.copyfile(path, targetPath)
+				continue
 
 			thisChart = {}
 			thisChart['x']=x
 			thisChart['y']=y
-			thisChart['z']=z
+			thisChart['extraData']=extraData
 			thisChart['programName']=programName
 			thisChart['label']=label
 			thisChart['mode']=allLabels[mode]['mode']
 			print 'set Mode to', thisChart['mode']
 			thisChart['extraRange']=False
 			allCharts.append(thisChart)
+
+		if mode == 'rename': return
+
 		logReader.buildFigure(allCharts, allLabels[mode], deltaMode, self.chartTitleEntry.get_text(), mode=mode, patchLoad=patchLoad)
 
 
 
 	def drop_cb(self, wid, context, x, y, time):
 		targets = context.list_targets()
-		print 'main', targets
 		wid.drag_get_data(context, targets[-1], time)
 		return True
 
 	def got_data_cb(self, wid, context, x, y, data, info, time):
-		print data
 		paths = data.get_uris()
 		for uri in paths:
 			path = urlparse.unquote(urlparse.urlparse(uri).path)

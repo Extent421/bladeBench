@@ -168,6 +168,7 @@
               <item id="commandRaw" translatable="yes">command Raw</item>
               <item id="overview" translatable="yes">overview</item>
               <item id="stats" translatable="yes">stats</item>
+              <item id="rename" translatable="yes">rename</item>
             </items>
           </object>
           <packing>

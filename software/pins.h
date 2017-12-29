@@ -7,6 +7,9 @@
 
 #define HX_CLK_PIN	5
 #define HX_DAT_PIN	6
+
+#define LOADSENSE_PIN A9
+
 #define TACH_PIN	7
 #define TACH_PIN_A	A8
 #define RANGE_3S	25

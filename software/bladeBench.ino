@@ -10,7 +10,6 @@
 
 #include "Servo.h"
 
-#include "HX711.h"
 #include <SPI.h>
 #include <SdFat.h>
 #include <ADC.h>
@@ -26,14 +25,15 @@ File file;
 ADC *adc = new ADC();
 ADC::Sync_result ADCresult;
 
-HX711 scale(HX_DAT_PIN, HX_CLK_PIN);
-float scaleCalibrationValue = 392.9;
+float scaleCalibrationValue = 117973.4857;
+long tareValue = 0;
+long scaleValue;
+volatile bool scaleUpdated = false;
 
 Servo ESC;
 Servo AUX;
 
 IntervalTimer logSampler;
-IntervalTimer scaleUpdate;
 IntervalTimer commandTrigger;
 IntervalTimer idler;
 
@@ -44,8 +44,8 @@ float rawTemp;
 float rawVolt;
 float cValue;
 float correctionFactor = 2.5/pow(2,16); // ADC to volt. 2.5v external reference
-long scaleValue;
-volatile bool scaleUpdated = false;
+
+vCalibration vCalibrate;
 
 //double loopCount = 0;
 uint16_t bounceCount = 0;
@@ -75,6 +75,8 @@ ringIndexManager tachCalibrationIndex(2);
 volatile bool tachCalibrated = 0;
 volatile bool tachCalibrateRunning = 0;
 uint16_t tachCalibrationCount = 0;
+
+uint8_t ADCAveraging = 4;
 
 bool abortTest = false;
 uint8_t abortReason = ABORT_NONE;
@@ -118,6 +120,8 @@ uint32_t sampleRateMicros = (1.0/sampleRate)*1000000;
 uint16_t tempShutdownValue = 0;
 
 volatile bool samplerActive = false;
+volatile bool loadSamplerActive = false;
+
 
 command commandBuffer[COMMANDBUFFER_SIZE];
 volatile uint8_t commandIndex = 0;
@@ -180,11 +184,10 @@ void setup() {
 
 	setSamplerADCSettings();
 
-    scaleUpdate.priority(240); // set very low priority
 	logSampler.priority(200); // set lowish priority.  We want to let regular fast ISRs (like servo timing) to be able to interrupt
 
 
-	setupLoadCell();
+	//setupLoadCell();
 
 	Wire2.begin(I2C_MASTER, 0x00, I2C_PINS_3_4, I2C_PULLUP_EXT, 400000);
 	Wire2.setDefaultTimeout(10000); // 10ms
@@ -205,42 +208,16 @@ void setup() {
 
 	pinMode(LED_PIN, OUTPUT);
 	digitalWrite(LED_PIN, 1);
+	Serial.println();
+
+	Serial.println(F("ready"));
 
 
 }
 
 void loop() {
-	//dump anything sitting in the serial buffer
-	while (Serial.read() >= 0) {}
-	Serial.println();
 
-	Serial.println(F("type:"));
-	Serial.println(F("r - run"));
-	Serial.println(F("t - test"));
-
-	//spin while waiting for user input
-	while(!Serial.available()) {
-		handleSerialCommandInput();
-	}
-
-	char c = tolower(Serial.read());
-
-	// Discard extra Serial data.
-	do {
-	delay(10);
-	} while (Serial.read() >= 0);
-
-	if (c == 'r') {
-		loadProgram("program.txt");
-		doTestLog();
-	} else 	if (c == 't') {
-	  testFunc();
-	} else 	if (c == 'e') {
-		Serial5.println("Serial Echo");
-		Serial.println("Serial Echo");
-	}  else {
-	Serial.println(F("Invalid entry"));
-	}
+	handleSerialCommandInput();
 
 }
 
@@ -383,6 +360,8 @@ void commandISR(){
 }
 
 void adc0_isr(void) {
+
+
 	if(samplerActive){ //last ADC request was from the sampler, grab the v/a
 		ADCresult = adc->readSynchronizedSingle();
 
@@ -396,6 +375,16 @@ void adc0_isr(void) {
 		sampleBufferIndex.nextWrite();
 		samplerActive = false;
 
+		adc->adc0->startSingleRead(LOADSENSE_PIN);
+		loadSamplerActive = true;
+
+
+	} else if(loadSamplerActive){
+		scaleUpdated = true;
+		loadSamplerActive = false;
+		scaleValue=(uint16_t)adc->adc0->readSingle();
+
+
 		if (lastTempReadingTimer > 1){
 			if ( tempEnable[tempIndex.write]){
 				adc->adc0->startSingleRead(tempPins[tempIndex.write]);
@@ -405,6 +394,7 @@ void adc0_isr(void) {
 			lastTempReadingTimer = 0;
 		}
 		//adc->adc0->readSingle(); // clear interrupt
+
 	} else {
 		//get the temp update
 		tempValues[tempIndex.write]=(uint16_t)adc->adc0->readSingle();
@@ -483,28 +473,20 @@ void tachCalibrationISR() {
 
 }
 
-void scaleISR() {
-	//hacky trick to get around interrupt priority (tach and scale share port)
-	//quickly fire off a low priority timer job that we can immediately end
-	//when all high priority isrs have finished
-	scaleUpdate.begin(scaleUpdateJob, 1);
-
-}
-
 void setSamplerADCSettings(){
 	//adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_0);
 	adc->setReference(ADC_REFERENCE::REF_EXT, ADC_0);
-    adc->setAveraging(4, ADC_0); // set number of averages
+    adc->setAveraging(ADCAveraging, ADC_0); // set number of averages
     adc->setResolution(16, ADC_0); // set bits of resolution
     adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS, ADC_0); // change the conversion speed
-    adc->setSamplingSpeed(ADC_SAMPLING_SPEED::VERY_HIGH_SPEED   , ADC_0); // change the sampling speed
+    adc->setSamplingSpeed(ADC_SAMPLING_SPEED::HIGH_SPEED   , ADC_0); // change the sampling speed
 
 	//adc->setReference(ADC_REFERENCE::REF_3V3 , ADC_1);
 	adc->setReference(ADC_REFERENCE::REF_EXT, ADC_1);
-    adc->setAveraging(4, ADC_1); // set number of averages
+    adc->setAveraging(ADCAveraging, ADC_1); // set number of averages
     adc->setResolution(16, ADC_1); // set bits of resolution
     adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED_16BITS, ADC_1); // change the conversion speed
-    adc->setSamplingSpeed(ADC_SAMPLING_SPEED::VERY_HIGH_SPEED   , ADC_1); // change the sampling speed
+    adc->setSamplingSpeed(ADC_SAMPLING_SPEED::HIGH_SPEED   , ADC_1); // change the sampling speed
 
     adcMaxValue = adc->getMaxValue(ADC_0);
 
@@ -538,20 +520,6 @@ void zeroSampleBuffers(){
 	}
 }
 
-void scaleUpdateJob() {
-	scaleUpdate.end();
-	detachInterrupt(HX_DAT_PIN); //kill the interrupt before we do any coms on the pin
-	updateScaleValue();
-	scaleUpdated = true;
-	attachInterrupt(HX_DAT_PIN, scaleISR, FALLING);
-}
-
-void killScaleUpdateJobs() {
-	//make sure all the scale jobs are dead
-	scaleUpdate.end();
-	detachInterrupt(HX_DAT_PIN); //kill the interrupt before we do any coms on the pin
-}
-
 void resetCommandBuffer(){
 	//reset the entire command buffer
 	for (unsigned int i=0; i<COMMANDBUFFER_SIZE; i++ ) {
@@ -577,8 +545,12 @@ void vbatAutorange(){
 	raw = (uint16_t)adc->analogRead( VSENSE_PIN, ADC_1);
 	if (raw*correctionFactor < 1.2) {
 		digitalWrite(RANGE_3S, 1);
+		vCalibrate.active = vCalibrate.cell3;
+		vCalibrate.activeOffset = vCalibrate.cell3Offset;
 		Serial5.println("set 3s");
 	} else {
+		vCalibrate.active = vCalibrate.cell6;
+		vCalibrate.activeOffset = vCalibrate.cell6Offset;
 		Serial5.println("set 6s");
 	}
 	delay(1); // let the vsense settle
@@ -709,63 +681,6 @@ void getSample(){
 	}
 }
 
-void getCSVLine(char* str){
-	float volts;
-	float amps;
-	float RPM = 0;
-	float temperatureValue = 0;
-	char temp[80];
-
-
-    volts = getVolts( sampleBuffer[sampleBufferIndex.read].volts );
-    amps = getAmps( sampleBuffer[sampleBufferIndex.read].amps );
-
-	//format the CSV line
-	sprintf(temp, "%lu,%i", sampleBuffer[sampleBufferIndex.read].time, sampleBuffer[sampleBufferIndex.read].commandValue);
-
-	strcat(str, temp);
-
-	if (sampleBuffer[sampleBufferIndex.read].tachPulsePresent){
-		RPM = ((1000000.0/sampleBuffer[sampleBufferIndex.read].tachPulse)/pulsesPerRev )*60;
-
-		sprintf(temp, ",%.3f", RPM);
-		strcat(str, temp);
-	}else {
-		strcat(str, ",");
-
-	}
-
-	sprintf(temp, ",%.3f,%.3f",  volts, amps);
-	strcat(str, temp);
-
-	if (sampleBuffer[sampleBufferIndex.read].thrustPresent){
-		sprintf(temp, ",%.2f\n", sampleBuffer[sampleBufferIndex.read].thrust);
-
-		strcat(str, temp);
-
-	}else {
-		strcat(str, ",");
-
-	}
-
-	for (unsigned int i=0; i<4; i++ ) {
-		if (tempUpdate[i]){
-			tempUpdate[i]=false;
-			temperatureValue = getTemp(tempValues[0]);
-			sprintf(temp, ",%.2f", temperatureValue);
-			strcat(str, temp);
-		}else {
-			strcat(str, ",");
-
-		}
-	}
-
-
-
-	strcat(str, "\n");
-
-}
-
 void statFunc() {
 	uint16_t raw = 0;
 	float value;
@@ -776,7 +691,7 @@ void statFunc() {
     adcMaxValue = adc->getMaxValue(ADC_0);
 
 	raw = (uint16_t)adc->analogRead(TACH_PIN_A);
-    Serial5.print("Tach sense ");
+    Serial5.print("Tach sense:");
     Serial5.println( (float)raw/adcMaxValue );
 
 	setSamplerADCSettings();
@@ -787,22 +702,23 @@ void statFunc() {
     ADCresult = adc->analogSynchronizedRead(ISENSE_PIN, VSENSE_PIN);
     //     adc->startSynchronizedSingleRead(ISENSE_PIN, VSENSE_PIN);
     value = getVolts( (uint16_t)ADCresult.result_adc1 );
-    Serial5.print("volt ");
-    Serial5.println(value);
+    Serial5.print("volt:");
+    Serial5.print(value);
+    Serial5.print(" ");
+    Serial5.println( (uint16_t)ADCresult.result_adc1 );
     value = getAmps( (uint16_t)ADCresult.result_adc0 );
-    Serial5.print("amp ");
-    Serial5.println(value);
+    Serial5.print("amp:");
+    Serial5.print(value);
+    Serial5.print(" ");
+    Serial5.println( (uint16_t)ADCresult.result_adc0 );
 
-	scaleValue = scale.get_units();
-    Serial5.print("thust ");
-    Serial5.println(scale.get_units(),4);
-    Serial5.print("thrust raw ");
-    Serial5.println(scale.get_value());
-    byteMap convert;
+	scaleValue=adc->analogRead(LOADSENSE_PIN);
 
-
-
-
+	//scaleValue = scale.get_units();
+    Serial5.print("thrust:");
+    Serial5.print((scaleValue-tareValue)/scaleCalibrationValue,4);
+    Serial5.print(" ");
+    Serial5.println(scaleValue-tareValue);
 
 }
 
@@ -876,7 +792,7 @@ void tachCalibrateLog(const char logfile[]) {
 		return;
 	}
 
-	for (int i; i<800; i++){
+	for (int i=0; i<800; i++){
 		setWiper(i+100);
 	    raw = (uint16_t)adc->analogRead(TACH_PIN_A);
 
@@ -1033,7 +949,6 @@ void doTestLog() {
 	sampleBufferIndex.reset();
 	overrunS = 0;
 	maxSampleBuffer = 0;
-	char str[80];
 
 	if (!sd.begin()) sd.initErrorHalt("SdFatSdioEX begin failed");
 	sd.chvol();
@@ -1075,9 +990,6 @@ void doTestLog() {
 	tachTime = 0;
 	lastTachPulse = 1000000/( (1.0/60) *pulsesPerRev); //start tach at 1 rpm
 
-	// start the load cell ADC
-	scaleISR();
-
 	//startup the ADC so it's ready to read on the first sample
     adc->enableInterrupts();
 
@@ -1096,16 +1008,6 @@ void doTestLog() {
 
 		while ( sampleBufferIndex.getFillLength() > 0  ){
 			maxSampleBuffer = max( sampleBufferIndex.getFillLength(), maxSampleBuffer);
-			//memset(str, 0, 80);
-
-			/*
-			str[0] = 0;
-			getCSVLine(str);
-			if (!file.write(str) ) {
-				Serial.println("write data failed");
-			}
-			*/
-
 
 			ringIndexManager byteIndex(33);
 			byteIndex.reset();
@@ -1238,17 +1140,6 @@ void doTestLog() {
 
 			zeroSample(sampleBufferIndex.read);
 			sampleBufferIndex.nextRead();
-			/*
-			writeBufferIndex.nextWrite();
-
-			if (!file.write(writeBuffer[writeBufferIndex.read].data, strlen(writeBuffer[writeBufferIndex.read].data))) {
-				Serial.println("write data failed");
-			}
-			memset(writeBuffer[writeBufferIndex.read].data, 0, BUFFERSIZE+1);
-			// mark it as available in the ringbuffer
-			writeBuffer[writeBufferIndex.read].full = false;
-			writeBufferIndex.nextRead();
-			*/
 
 		}
 
@@ -1280,8 +1171,6 @@ void doTestLog() {
 			logSampler.end();
 			// kill the tach ISR
 			detachInterrupt(TACH_PIN);
-			// kill the load cell ISR
-			killScaleUpdateJobs();
 			//add any tail info to the log file
 			logTail();
 
@@ -1350,6 +1239,14 @@ void logHead(){
 	sprintf(str, "command update rate: %i\n", commandUpdateRate );
 	file.write(str);
 	sprintf(str, "adcMaxValue: %i\n", adcMaxValue );
+	file.write(str);
+	sprintf(str, "vCalibrate: %.6f\n", vCalibrate.active );
+	file.write(str);
+	sprintf(str, "vOffset: %.6f\n", vCalibrate.activeOffset );
+	file.write(str);
+	sprintf(str, "aCalibrate: %.6f\n", vCalibrate.amp );
+	file.write(str);
+	sprintf(str, "aOffset: %.6f\n", vCalibrate.ampOffset );
 	file.write(str);
 	sprintf(str, "thermBValue: %i\n", thermBValue );
 	file.write(str);
@@ -1449,16 +1346,11 @@ float getVolts(const float rawValue){
 
 
 	//get absolute voltage
-	float rawVolt = rawValue*correctionFactor;
+	//float rawVolt = rawValue*correctionFactor;
 
 	//AttoPilot 90A sensor
-	//float vValue = rawVolt*(1.0/0.06369) ;
-	//float calibration = 13.0153255458302; //6s mode
-	float calibration = 5.9652021980316; //3s mode
 
-
-	float vValue = rawVolt*calibration ;
-
+	float vValue = (rawValue+vCalibrate.activeOffset)/vCalibrate.active; ;
 	//allegro 100a divider values
 	// 25.44/1.278   total 26.72
 	//double vValue = rawVolt / (1.278/26.72 ) ;
@@ -1472,10 +1364,10 @@ float getAmps(const float rawValue){
 
 
 	//get absolute voltage
-	float rawVolt = rawValue*correctionFactor;
+	//float rawVolt = rawValue*correctionFactor;
 
 	//AttoPilot 90A sensor
-	float aValue = rawVolt*34.5867331938442 + .13;
+	float aValue = (rawValue+vCalibrate.ampOffset)/vCalibrate.amp;
 
 	//allegro 100a divider values
 	// 20mv/A ,  0amp point 1/2 supply voltage
@@ -1488,27 +1380,10 @@ float getAmps(const float rawValue){
 	return aValue;
 }
 
-void setupLoadCell() {
-	// TODO: calibration
-	scale.set_gain(128);
-	scale.set_scale(scaleCalibrationValue);          // this value is obtained by calibrating the scale with known weights;
-	tare();
-}
-
 void tare() {
-	scale.tare(8);				        // reset the scale to 0, 8 samples average
-}
+	//scale.tare(8);				        // reset the scale to 0, 8 samples average
+	tareValue =	adc->analogRead(LOADSENSE_PIN);
 
-void powerScale() {
-	// nothing going on here yet
-	scale.power_down();			        // put the ADC in sleep mode
-	scale.power_up();
-}
-
-bool updateScaleValue() {
-	// update the global measurement value, but only if the scale is ready to be read
-	scaleValue = scale.get_value();
-	return true;
 }
 
 void setCommandUpdateRate(uint16_t rate){
@@ -1537,6 +1412,11 @@ void setSampleRate(uint16_t rate){
 }
 
 void loadConfig() {
+	loadConfigFile("calibrate.cfg");
+	loadConfigFile("config.cfg");
+}
+
+void loadConfigFile(const char configFile[]) {
 	if (!sd.begin()) sd.initErrorHalt("SdFatSdioEX begin failed");
 	sd.chvol();
 
@@ -1546,7 +1426,7 @@ void loadConfig() {
 	  char * propertyValue;
 	  float value;
 
-	  ifstream sdin("config.txt");
+	  ifstream sdin(configFile);
       Serial.println("loading config");
 
 	  while (sdin.getline(buffer, line_buffer_size, '\n') || sdin.gcount()) {
@@ -1657,7 +1537,14 @@ void loadConfig() {
 			  value = atof(propertyValue);
 		      Serial.println("setting loadCellCalibration");
 		      scaleCalibrationValue = value;
-		      setupLoadCell();
+		      continue;
+		    }
+		  if (strncmp (buffer,"ADCAveraging",strlen("ADCAveraging")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting ADCAveraging");
+		      ADCAveraging = (uint8_t)value;
 		      continue;
 		    }
 		  if (strncmp (buffer,"tachSensitivity",strlen("tachSensitivity")) == 0)
@@ -1668,9 +1555,86 @@ void loadConfig() {
 		      setWiper(value);
 		      continue;
 		    }
-
-
-
+		  if (strncmp (buffer,"vCalibrate3S",strlen("vCalibrate3S")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting vCalibrate3S");
+		      vCalibrate.cell3 = value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"vCalibrate4S",strlen("vCalibrate4S")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting vCalibrate4S");
+		      vCalibrate.cell4 = value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"vCalibrate5S",strlen("vCalibrate5S")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting vCalibrate5S");
+		      vCalibrate.cell5 = value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"vCalibrate6S",strlen("vCalibrate6S")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting vCalibrate6S");
+		      vCalibrate.cell6 = value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"vOffset3S",strlen("vOffset3S")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting vOffset3S");
+		      vCalibrate.cell3Offset = value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"vOffset4S",strlen("vOffset4S")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting vOffset4S");
+		      vCalibrate.cell4Offset = value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"vOffset5S",strlen("vOffset5S")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting vOffset5S");
+		      vCalibrate.cell5Offset = value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"vOffset6S",strlen("vOffset6S")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting vOffset6S");
+		      vCalibrate.cell6Offset = value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"aCalibrate",strlen("aCalibrate")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting aCalibrate");
+		      vCalibrate.amp = value;
+		      continue;
+		    }
+		  if (strncmp (buffer,"aOffset",strlen("aOffset")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  value = atof(propertyValue);
+		      Serial.println("setting aOffset");
+		      vCalibrate.ampOffset = value;
+		      continue;
+		    }
 	  }
 
 	  sdin.close();
@@ -1867,7 +1831,7 @@ void runSerialCommand(){
 		if(strlen(fileString)){
 			loadProgram(fileString);
 		} else {
-			loadProgram("program.txt");
+			loadProgram((char *)"program.txt");
 		}
 
 		doTestLog();

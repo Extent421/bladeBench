@@ -38,6 +38,21 @@ struct command {
 	bool useMicros = false;
 };
 
+struct vCalibration {
+	float active = 0;
+	float activeOffset = 0;
+	float cell3 = 3665;
+	float cell4 = 0;
+	float cell5 = 0;
+	float cell6 = 13.0153255458302;
+	float cell3Offset = 115;
+	float cell4Offset = 0;
+	float cell5Offset = 0;
+	float cell6Offset = 0;
+	float amp = 730;
+	float ampOffset = 295;
+};
+
 union byteMap {
 	uint8_t uint8[4];
 	uint16_t uint16[2];

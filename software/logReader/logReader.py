@@ -7,11 +7,15 @@ import gzip
 import json
 
 from bokeh.plotting import figure, output_file, show, reset_output, ColumnDataSource
-from bokeh.models import HoverTool, Range1d, LinearAxis, LinearColorMapper, ColorBar, BasicTicker, PrintfTickFormatter, CustomJS, TapTool
+from bokeh.models import HoverTool, Range1d, LinearAxis, LinearColorMapper, ColorBar, BasicTicker, PrintfTickFormatter, CustomJS, TapTool, Slider, widgets
+from bokeh.layouts import row, widgetbox
 from bokeh import events
 
 import numpy.polynomial.polynomial as poly
 import numpy
+
+import scipy.signal as signal
+
 
 useCache = False
 
@@ -19,30 +23,51 @@ class smoother():
 	medTaps = 6
 	avgTaps = 6
 
-	def __init__(self, medTaps=6, avgTaps=6):
+	def __init__(self, medTaps=6, avgTaps=6, preAvgTaps=1):
 		self.medAcc = []
 		self.avgAcc = []
+		self.preAvgAcc = []
 		self.medTaps = medTaps
 		self.avgTaps = avgTaps
+		self.preAvgTaps = preAvgTaps
 
 	def add(self, value):
-			self.medAcc.append(value)
+			self.preAvgAcc.append(value)
+			self.preAvgAcc = self.preAvgAcc[-self.preAvgTaps:]
+			preAvgVal = numpy.mean(self.preAvgAcc)
+
+			self.medAcc.append(preAvgVal)
 			self.medAcc = self.medAcc[-self.medTaps:]
-			med = copy.deepcopy(self.medAcc)
-			med.sort()
 
-			self.avgAcc.append(  med[ int(len(med)/2 ) ]  )
+			medVal = numpy.median(self.medAcc)
+			self.avgAcc.append( medVal  )
 			self.avgAcc = self.avgAcc[-self.avgTaps:]
-	def get(self):
-		sum=0
-		for item in self.avgAcc:
-			sum += item
-		avg=sum/len(self.avgAcc)
 
+	def get(self):
 		#if len(self.avgAcc) < self.avgTaps:
 		#	print self.avgAcc
 
-		return(avg)
+		return(numpy.mean(self.avgAcc))
+
+
+class KalmanFilter(object):
+
+    def __init__(self, process_variance, estimated_measurement_variance):
+        self.process_variance = process_variance
+        self.estimated_measurement_variance = estimated_measurement_variance
+        self.posteri_estimate = 0.0
+        self.posteri_error_estimate = 1.0
+
+    def add(self, measurement):
+        priori_estimate = self.posteri_estimate
+        priori_error_estimate = self.posteri_error_estimate + self.process_variance
+
+        blending_factor = priori_error_estimate / (priori_error_estimate + self.estimated_measurement_variance)
+        self.posteri_estimate = priori_estimate + blending_factor * (measurement - priori_estimate)
+        self.posteri_error_estimate = (1 - blending_factor) * priori_error_estimate
+
+    def get(self):
+        return self.posteri_estimate
 
 MIN_SAMPLE_TIME = 100 #minimum time between sample readings in micros
 
@@ -135,7 +160,10 @@ def readBinaryLog(file):
 		adcMax = None
 		vref = None
 		dataStart = None
-		vCalibrationFactor =  5.9652021980316 #3s mode
+		vCalibrationFactor = 3665 #3s mode
+		vCalibrationOffset = 115 
+		aCalibrationFactor = 730.0
+		aCalibrationOffset = 296.0
 		loadCellCalib = 200.9647
 		programName = None
 
@@ -155,13 +183,22 @@ def readBinaryLog(file):
 					vCalibrationFactor =  13.0153255458302 #6s mode
 				else:
 					vCalibrationFactor =  5.9652021980316 #3s mode
+			if 'vCalibrate:' in line:
+				vCalibrationFactor = float(line.split(':')[-1])
+				print 'set vCalibration', vCalibrationFactor
+			if 'vOffset:' in line:
+				vCalibrationOffset = float(line.split(':')[-1])
+			if 'aCalibrate:' in line:
+				aCalibrationFactor = float(line.split(':')[-1])
+			if 'aOffset:' in line:
+				aOffset = float(line.split(':')[-1])
+
 			if 'loaded program:' in line:
 				programName = line.split(':')[-1].strip()
 
 			if line == 'Data Start:\n':
 				dataStart = f.tell()
 				break
-		print 'found start', dataStart, adcMax, vref
 		#f.seek(dataStart-1)
 
 		correctionValue = vref/adcMax
@@ -217,8 +254,8 @@ def readBinaryLog(file):
 				data = f.read(2)
 				if not len(data): break
 				unpacked = struct.unpack('<H', data)[0]
-				adcVolt = unpacked * correctionValue
-				sensorVolt = adcVolt * vCalibrationFactor
+				adcVolt = unpacked #* correctionValue
+				sensorVolt = (adcVolt+vCalibrationOffset)/vCalibrationFactor
 				thisSample['Volt']=sensorVolt
 				index['Volt'].append(len(allSamples))
 
@@ -226,10 +263,8 @@ def readBinaryLog(file):
 				data = f.read(2)
 				if not len(data): break
 				unpacked = struct.unpack('<H', data)[0]
-				adcVolt = unpacked * correctionValue
-				calibrationFactor = 34.5867331938442
-				offset = 0.13
-				sensorAmps = adcVolt * calibrationFactor + offset
+				adcVolt = unpacked #* correctionValue
+				sensorAmps = (adcVolt+aCalibrationOffset)/aCalibrationFactor
 				thisSample['Amp']=sensorAmps
 				index['Amp'].append(len(allSamples))
 
@@ -382,47 +417,30 @@ def readBinaryLog(file):
 			allSamples[tIndex]['RPMRaw']=(allSamples[tIndex]['RPM']/pulsePerRev)
 			allSamples[tIndex]['RPM']=(allSamples[tIndex]['RPM']/pulsePerRev)*numpy.mean(numpy.array( calibrateValues[tachIndex] ))    
 
-
 	# reject obvious noise samples
-	
+
+	highValueIndexFilter(index, allSamples, 'RPM', cutoff=65000)
+
+	print 'tach noise filter...'
+	stdIndexFilter(index, allSamples, 'RPM', windowSize=3, distanceMult=10)
+	stdIndexFilter(index, allSamples, 'RPM', windowSize=10, distanceMult=10)
+	#stdIndexFilter(index, allSamples, 'RPM', windowSize=10, distanceMult=10)
+
 	print 'thrust noise filter...'
-	thrustMed = []
-	window = []
-	for sampleIndex in index['Thrust']:
-		window.append( allSamples[sampleIndex]['Thrust'] )
-		if len(window)>3:
-			window = window[-3:]
-		thrustMed.append( numpy.median(window) )
+	stdIndexFilter(index, allSamples, 'Thrust', windowSize=3, distanceMult=20)
 
-	rejectionCount = 0
-	window = []
-	newIndexList = []
-	for thisIndex, median in enumerate(thrustMed):
-		minIndex = thisIndex-2
-		maxIndex = thisIndex+2
-		if minIndex<0: minIndex = 0
-		if maxIndex>len(thrustMed)-1: maxIndex = len(thrustMed)-1
-
-		thisSTD = numpy.std(numpy.array( thrustMed[minIndex:maxIndex] ))
-		thisSampleIndex = index['Thrust'][thisIndex]
-		thisValue = allSamples[thisSampleIndex]['Thrust']
-		distance = abs( median-thisValue)
-
-		if distance>20*thisSTD:
-			print 'rejecting sample', getFloatTime(allSamples[thisSampleIndex]['Time']), distance, thisSTD, thisValue
-			del allSamples[thisSampleIndex]['Thrust']
-			rejectionCount = rejectionCount +1
-		else:
-			newIndexList.append(thisSampleIndex)
-
-	index['Thrust']=newIndexList
-
-	print 'Total rejections', rejectionCount
+	#lowpass filter
+	if len(index['RPM']):
+		lowpassIndexFilter(index, allSamples, 'RPM', order=2, cutoff=.1)
+	if len(index['Thrust']):
+		lowpassIndexFilter(index, allSamples, 'Thrust', order=2, cutoff=.01)
+	lowpassIndexFilter(index, allSamples, 'Amp', order=1, cutoff=.01)
+	lowpassIndexFilter(index, allSamples, 'Volt', order=1, cutoff=.01)
+	if len(index['T4']):
+		lowpassIndexFilter(index, allSamples, 'T4', order=1, cutoff=.01)
 
 
-
-
-	#auto TARE.  based on first 1 sec of log
+	#auto TARE.
 
 	print 'auto TARE...'
 
@@ -452,21 +470,10 @@ def readBinaryLog(file):
 		if roundedTime<minTARETime: continue
 		if roundedTime>maxTARETime: break
 		
-		TARESamples.append(allSamples[sampleIndex]['Thrust'])
+		TARESamples.append(allSamples[sampleIndex]['ThrustF'])
 
 	print 'TARE range ', minTARETime, maxTARETime
 
-	'''
-	TAREMedian = numpy.median( numpy.array( TARESamples ) )
-	cleanedSamples = []
-	for sample in TARESamples:
-		thisError = sample/TAREMedian
-
-		#sanity check error amount, drop the sample from calibration if it's too far out
-		if (thisError <0.5) or (thisError > 2):
-			continue
-		cleanedSamples.append(sample)
-		'''
 	cleanedSamples = stdFilter(TARESamples, mult=1)
 	print 'using ' , len(cleanedSamples), '/', len(TARESamples)
 	TAREAverage = numpy.mean( numpy.array( cleanedSamples ) )
@@ -474,12 +481,17 @@ def readBinaryLog(file):
 
 	for sampleIndex in index['Thrust']:
 		allSamples[sampleIndex]['Thrust'] = allSamples[sampleIndex]['Thrust'] - TAREAverage
+		allSamples[sampleIndex]['ThrustF'] = allSamples[sampleIndex]['ThrustF'] - TAREAverage
+
+
 
 
 	#interpolate
 	for key in index:
 		if key == 'RPMIndex' : continue
 		if key == 'calibrate' : continue
+		if not len(index[key]) : continue
+		print 'interpolating', key
 
 		seq = index[key]
 		for a, b in zip(seq, seq[1:]):
@@ -490,6 +502,14 @@ def readBinaryLog(file):
 			delta = end-start
 			for i in range(1,length):
 				allSamples[a+i][key] =start + delta*(float(i)/length)
+
+		#fill the head of the sample with the first sample value
+		for sampleIndex in range( index[key][0] ):
+			allSamples[sampleIndex][key] = allSamples[index[key][0]][key]
+		#fill the tail of the sample with the last sample value
+		for sampleIndex in range( len(allSamples) - index[key][-1] ):
+			allSamples[sampleIndex+index[key][-1]][key] = allSamples[index[key][-1]][key]
+
 
 
 	if useCache:
@@ -574,6 +594,78 @@ def getStats(allSample, index):
 
 	return 
 
+def highValueIndexFilter(index, allSamples, key, cutoff=1):
+	rejectionCount = 0
+	newIndexList = []
+	for sampleIndex in index[key]:
+		if allSamples[sampleIndex][key] < cutoff:
+			newIndexList.append(sampleIndex)
+		else:
+			del allSamples[sampleIndex][key]
+			rejectionCount = rejectionCount +1
+	
+	index[key]=newIndexList
+
+	print 'Value filter: Total', key, 'rejections', rejectionCount
+
+def lowpassIndexFilter(index, allSamples, key, order=1, cutoff=.01):
+	temp = []
+	for sampleIndex in index[key]:
+		temp.append( allSamples[sampleIndex][key] )
+
+	filtered = butterFilter(temp, order=order, cutoff=cutoff)
+	for filteredIndex in range( len(temp) ):
+		sampleIndex = index[key][filteredIndex]
+		allSamples[sampleIndex][key+'F']=filtered[filteredIndex]
+
+	index[key+'F']=index[key]
+	print 'created filtered index ', key+'F'
+
+
+def stdIndexFilter(index, allSamples, key, windowSize=3, distanceMult=20):
+	tachMed = []
+	window = []
+	for sampleIndex in index[key]:
+		window.append( allSamples[sampleIndex][key] )
+		if len(window)>windowSize:
+			window = window[-windowSize:]
+		tachMed.append( numpy.median(window) )
+
+	rejectionCount = 0
+	window = []
+	newIndexList = []
+	for thisIndex, median in enumerate(tachMed):
+		minIndex = thisIndex-2
+		maxIndex = thisIndex+2
+		if minIndex<0: minIndex = 0
+		if maxIndex>len(tachMed)-1: maxIndex = len(tachMed)-1
+
+		thisSTD = numpy.std(numpy.array( tachMed[minIndex:maxIndex] ))
+		thisSampleIndex = index[key][thisIndex]
+		thisValue = allSamples[thisSampleIndex][key]
+		distance = abs( median-thisValue)
+
+		if(False):
+			thisTime = getFloatTime(allSamples[thisSampleIndex]['Time'])
+			if (thisTime > 7.531) and (thisTime < 7.536 ):
+				print key, 'sample at', getFloatTime(allSamples[thisSampleIndex]['Time']), 'dist:', distance, 'med:', median, 'std:', thisSTD, 'value:', thisValue
+				if distance>10*thisSTD:
+					print 'rejected'
+
+
+		if distance>distanceMult*thisSTD:
+			#print 'rejecting sample', getFloatTime(allSamples[thisSampleIndex]['Time']), distance, thisSTD, thisValue
+			del allSamples[thisSampleIndex][key]
+			rejectionCount = rejectionCount +1
+		else:
+			newIndexList.append(thisSampleIndex)
+
+	index[key]=newIndexList
+
+	print 'Total', key, 'rejections', rejectionCount
+
+
+
 def reject_outliers(samples, m = 2.):
 	d = numpy.abs(samples - numpy.median(samples))
 	mdev = numpy.median(d)
@@ -592,6 +684,11 @@ def stdFilter(samples, mult=1):
 		if sample > maxVal: continue
 		cleanedSamples.append(sample)
 	return cleanedSamples
+
+def butterFilter(samples, order = 2, cutoff = 0.005 ):
+	B, A = signal.butter(order, cutoff)
+ 	filtered = signal.filtfilt(B,A, samples)
+ 	return filtered
 
 
 def getMiddleResults(samples, factor=0.1):
@@ -629,7 +726,7 @@ def getEfficiencyOverRPM(sample, index):
 
 	smoothV = smoother(avgTaps=24, medTaps=1)
 	smoothA = smoother(avgTaps=24, medTaps=1)
-	smoothT = smoother(avgTaps=6, medTaps=3)
+	smoothT = smoother(avgTaps=5, medTaps=29)
 	for sampleIndex in index['Volt']:
 
 		volt = sample[sampleIndex]['Volt']
@@ -654,28 +751,18 @@ def getMechanicalPower(sample, index):
 	x = []
 	y = []
 
-	smoothV = smoother(avgTaps=24, medTaps=1)
-	smoothA = smoother(avgTaps=24, medTaps=1)
-	smoothT = smoother(avgTaps=6, medTaps=3)
+	smoothT = smoother(avgTaps=5, medTaps=29)
 	for sampleIndex in index['Thrust']:
 		time = sample[sampleIndex]['Time']
 
-		volt = sample[sampleIndex]['Volt']
-		amp = sample[sampleIndex]['Amp']
-		smoothV.add( volt )
-		smoothA.add( amp )
-
 		if sampleIndex not in index['Thrust']: continue
 
-		thrust = sample[sampleIndex]['Thrust']
-		smoothT.add ( thrust )
+		thrust = sample[sampleIndex]['ThrustF']
 		rpm = sample[sampleIndex]['RPM']
 
 		if not rpm: continue
 
-		mechWatts = smoothT.get() * (rpm * ((2*math.pi)/60) )
-		watts = round(smoothV.get()*smoothA.get()  , 1 )
-		if not watts: continue
+		mechWatts = thrust * (rpm * ((2*math.pi)/60) )
 		y.append( round(mechWatts, 2) )
 		x.append( getFloatTime(time) )
 
@@ -685,17 +772,13 @@ def getTestWatts(sample, index):
 	x = []
 	y = []
 
-	smoothV = smoother(avgTaps=24, medTaps=1)
-	smoothA = smoother(avgTaps=24, medTaps=1)
 	for sampleIndex in index['Volt']:
 		time = sample[sampleIndex]['Time']
 
-		volt = sample[sampleIndex]['Volt']
-		amp = sample[sampleIndex]['Amp']
-		smoothV.add( volt )
-		smoothA.add( amp )
+		volt = sample[sampleIndex]['VoltF']
+		amp = sample[sampleIndex]['AmpF']
 		
-		watts = smoothV.get()*smoothA.get()
+		watts = volt*amp
 		if not watts: continue
 		y.append(round(watts, 2) )
 		x.append( getFloatTime(time) )
@@ -706,31 +789,25 @@ def getMechanicalEff(sample, index):
 	x = []
 	y = []
 
-	smoothV = smoother(avgTaps=24, medTaps=1)
-	smoothA = smoother(avgTaps=24, medTaps=1)
-	smoothT = smoother(avgTaps=6, medTaps=3)
 	for sampleIndex in index['Volt']:
 		time = sample[sampleIndex]['Time']
 		roundedTime = getFloatTime(time) 
 
-		if roundedTime<11: continue
-		if roundedTime>15: continue
+		#if roundedTime<11: continue
+		#if roundedTime>15: continue
 
-		volt = sample[sampleIndex]['Volt']
-		amp = sample[sampleIndex]['Amp']
-		smoothV.add( volt )
-		smoothA.add( amp )
+		volt = sample[sampleIndex]['VoltF']
+		amp = sample[sampleIndex]['AmpF']
 
 		if sampleIndex not in index['Thrust']: continue
 
-		thrust = sample[sampleIndex]['Thrust']
-		smoothT.add ( thrust )
+		thrust = sample[sampleIndex]['ThrustF']
 		rpm = sample[sampleIndex]['RPM']
 
 		if not rpm: continue
 		
-		mechWatts = smoothT.get() * (rpm * ((2*math.pi)/60) )
-		watts = smoothV.get()*smoothA.get()
+		mechWatts = thrust * (rpm * ((2*math.pi)/60) )
+		watts = volt*amp
 		if not watts: continue
 		y.append(round(mechWatts/watts, 2) )
 		x.append(roundedTime)
@@ -741,64 +818,97 @@ def getTorqueOverRPM(sample, index):
 	x = []
 	y = []
 	z = []
+	command = []
+	inWatts = []
 
-	smoothV = smoother(avgTaps=25, medTaps=1)
-	smoothA = smoother(avgTaps=25, medTaps=1)
-	smoothT = smoother(avgTaps=3, medTaps=5)
+
+	startTime = 8.75
+	endTime = 12.95
+	preLoad = 0
+
+	thisProgramName = sample[0]['programName']
+
 	for sampleIndex in index['Volt']:
 		time = sample[sampleIndex]['Time']
 		roundedTime = getFloatTime(time) 
 
-		if roundedTime<9.5: continue
-		if roundedTime>13: continue
+		if roundedTime<startTime-preLoad: continue
+		if roundedTime>endTime: continue
 
-		volt = sample[sampleIndex]['Volt']
-		amp = sample[sampleIndex]['Amp']
-		smoothV.add( volt )
-		smoothA.add( amp )
+		volt = sample[sampleIndex]['VoltF']
+		amp = sample[sampleIndex]['AmpF']
 
 		if sampleIndex not in index['Thrust']: continue
 
-		thrust = sample[sampleIndex]['Thrust']
-		smoothT.add ( thrust )
-		rpm = sample[sampleIndex]['RPM']
+		thrust = sample[sampleIndex]['ThrustF']
+		if roundedTime<startTime: continue
+
+		rpm = sample[sampleIndex]['RPMF']
 
 		if not rpm: continue
 		
-		mechWatts = smoothT.get() * (rpm * ((2*math.pi)/60) )
-		watts = smoothV.get()*smoothA.get()
+		mechWatts = thrust * (rpm * ((2*math.pi)/60) )
+		watts = volt*amp
 		if not watts: continue
 
-		y.append(round(smoothT.get(), 4) )
+		y.append(round(thrust, 4) )
 		x.append(rpm)
 		z.append(round(mechWatts/watts, 2) )
+		inWatts.append(round(watts, 1) )
+		command.append(sample[sampleIndex]['Motor Command'] )
 
-	return x, y, z, sample[0]['programName']
+	accX = []
+	accZ = []
+	accInWatts = []
+
+
+	mergedX = []
+	mergedY = []
+	mergedZ = []
+	mergedCommand = []
+	mergedInWatts = []
+	lastValue = y[0]
+
+	for index in range(0,len(x)):
+		if y[index] != lastValue:
+			mergedY.append(lastValue)
+			mergedCommand.append(command[index])
+			mergedX.append(numpy.mean(accX))
+			mergedZ.append(numpy.mean(accZ))
+			mergedInWatts.append(numpy.mean(accInWatts))
+			accX = []
+			accZ = []
+			accInWatts = []
+
+			lastValue = y[index]
+
+		accX.append(x[index])
+		accZ.append(z[index])
+		accInWatts.append(inWatts[index])
+
+
+		extraData = {}
+		extraData['z'] = mergedZ
+		extraData['inWatts'] = mergedInWatts
+		extraData['command'] = mergedCommand
+
+	return mergedX, mergedY, extraData, thisProgramName
 
 def getEfficiencyOverThrottle(sample, index):
 	x = []
 	y = []
 
-	smoothV = smoother(avgTaps=24, medTaps=1)
-	smoothA = smoother(avgTaps=24, medTaps=1)
-	smoothT = smoother(avgTaps=6, medTaps=3)
-	for sampleIndex in index['Volt']:
+	for sampleIndex in index['Thrust']:
 
-		volt = sample[sampleIndex]['Volt']
-		amp = sample[sampleIndex]['Amp']
-		smoothV.add( volt )
-		smoothA.add( amp )
-
-		if sampleIndex not in index['Thrust']: continue
-
-		thrust = sample[sampleIndex]['Thrust']
-		smoothT.add ( thrust )
+		volt = sample[sampleIndex]['VoltF']
+		amp = sample[sampleIndex]['AmpF']
+		thrust = sample[sampleIndex]['ThrustF']
 
 		throttle = sample[sampleIndex]['Motor Command']
 
-		watts = round(smoothV.get()*smoothA.get()  , 1 )
+		watts = round(volt*amp  , 1 )
 		if not watts: continue
-		y.append(round(smoothT.get(), 2)/watts )
+		y.append(round(thrust, 2)/watts )
 		x.append(throttle)
 
 	return x, y
@@ -808,12 +918,11 @@ def getThrust(sample, index):
 	x = []
 	y = []
 	smooth = smoother(avgTaps=1, medTaps=1)
-	tSmooth = smoother(avgTaps=1, medTaps=1)
+	tSmooth = smoother(avgTaps=5, medTaps=29)
 	for sampleIndex in index['Thrust']:
-		rpm = sample[sampleIndex]['RPM']
+		rpm = sample[sampleIndex]['RPMF']
 		time = sample[sampleIndex]['Time']
-		thrust = sample[sampleIndex]['Thrust']
-		if rpm > 60000: continue
+		thrust = sample[sampleIndex]['ThrustF']
 		if not rpm: continue
 		smooth.add( rpm )
 		smoothedValue = round(smooth.get(), 3 )
@@ -855,14 +964,22 @@ def getTestThrust(sample, index):
 	# thrust / RPM
 	x = []
 	y = []
-	smooth = smoother(avgTaps=1, medTaps=1)
+	#smooth = smoother(avgTaps=5, medTaps=100, preAvgTaps=20)
+	#smooth = smoother(avgTaps=1, medTaps=1, preAvgTaps=1)
+	#smooth = KalmanFilter(.01, 100)
+
+
+
+
 	for sampleIndex in index['Thrust']:
 		time = sample[sampleIndex]['Time']
-		thrust = sample[sampleIndex]['Thrust']
-		smooth.add( thrust )
-		smoothedValue =  round(smooth.get(), 4 )
+		thrust = sample[sampleIndex]['ThrustF']
+		#smooth.add( thrust )
+		y.append( thrust )
+		#smoothedValue =  round(smooth.get(), 4 )
 		x.append( getFloatTime(time) )
-		y.append(smoothedValue)
+		#y.append(smoothedValue)
+
 	return x, y
 
 def getThrottleThrust(sample, index):
@@ -905,12 +1022,9 @@ def getTestRpm(sample, index, deltaMode=False):
 
 	lastGoodTime = 0
 	lastValue = 0
-	for sampleIndex in index['RPM']:
+	for sampleIndex in index['RPMF']:
 		time = sample[sampleIndex]['Time']
-		rpm = sample[sampleIndex]['RPM']
-		if rpm > 65000: 
-			print 'False Trigger', lastGoodTime, time, time-lastGoodTime
-			continue
+		rpm = sample[sampleIndex]['RPMF']
 		x.append( getFloatTime(time) )
 		smooth.add( rpm )
 		thisValue = smooth.get()
@@ -950,7 +1064,8 @@ def getTestT1Raw(sample, index, deltaMode=False):
 	y = []
 	lastGoodTime = 0
 	lastValue = 0
-	dsmooth = smoother(avgTaps=70, medTaps=1)
+	dsmooth = smoother(avgTaps=70, medTaps=5)
+	smooth = smoother(avgTaps=1, medTaps=5)
 
 	for sampleIndex in index['T1']:
 		time = sample[sampleIndex]['Time']
@@ -964,7 +1079,8 @@ def getTestT1Raw(sample, index, deltaMode=False):
 			lastGoodTime = time
 			lastValue = T1
 		else:
-			y.append(T1)
+			smooth.add(T1)
+			y.append(smooth.get())
 
 	return x, y
 
@@ -1020,7 +1136,7 @@ def getTestVolts(sample, index):
 		smooth.add( volt )
 		if time-lastTime > MIN_SAMPLE_TIME:
 			x.append( getFloatTime(time) )
-			y.append(smooth.get())
+			y.append(sample[sampleIndex]['VoltF'])
 			lastTime = time
 	return x, y
 
@@ -1037,7 +1153,7 @@ def getTestAmps(sample, index):
 				
 		if time-lastTime > MIN_SAMPLE_TIME:
 			x.append( getFloatTime(time) )
-			y.append(smooth.get())
+			y.append(sample[sampleIndex]['AmpF'])
 			lastTime = time
 	return x, y
 
@@ -1124,7 +1240,7 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 	foundZ = False
 
 	for item in dataList[::-1]:
-		if item['z']:
+		if item['extraData']:
 			foundZ = True
 	tooltipList = [
 			#("index", "$index"),
@@ -1133,7 +1249,9 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 		]
 
 	if foundZ:
-		tooltipList.append(('z', "@z{1.11}") )
+		tooltipList.append(('eff', "@z{1.11}") )
+		tooltipList.append(('power', "@inWatts{1.11}") )
+		tooltipList.append(('command', "@command{1.11}") )
 
 	hover = HoverTool(
 		tooltips = tooltipList,
@@ -1169,12 +1287,15 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 	if outputTitle == 'Torque Over RPM':
 		allRanges = []
 		for item in dataList:
+			if '_' not in item['programName']: continue
 			throttleValue = int(item['programName'].split('_')[0])
 			smooth = smoother(avgTaps=3, medTaps=1)
 			smoothT = smoother(avgTaps=1, medTaps=3)
 			newZ = []
 			newY = []
-			for value in item['z']:
+
+
+			for value in item['extraData']['z']:
 				smooth.add(value)
 				newZ.append( smooth.get() )
 			count = 0
@@ -1198,9 +1319,9 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 				range[index]['start']=[item['x'][-1],newY[-1]]
 				range[index]['end']=[item['x'][-1],newY[-1]]
 
-			for index in xrange(len(item['z'] )-1, -1, -1): # count top down
+			for index in xrange(len(item['extraData']['z'] )-1, -1, -1): # count top down
 			#for index in xrange(0, len(item['z'] ), 1): # count bottom up
-				thisValue = item['z'][index]
+				thisValue = item['extraData']['z'][index]
 				if thisValue > 1: continue
 				if int(thisValue*10) > band:
 					range[band]['end']=[item['x'][index],newY[index]]
@@ -1219,7 +1340,6 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 		allMin = 10
 		for range in allRanges:
 			allMin = min(min(range.keys()), allMin)
-		print 'Lowest range', allMin
 
 		shapeCoords = {}
 		for shapeRange in xrange(0,11):
@@ -1289,7 +1409,6 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 		thisRange = defaultRange
 		if item['extraRange']:
 			rangeName = item['label'] + '_range'
-			print "made range", rangeName, item['extraRange']
 			p.extra_y_ranges.update( {rangeName: Range1d(start=0, end=item['extraRange'])} )
 			p.add_layout(LinearAxis(y_range_name=rangeName, axis_label=item['extraLabel']), 'left')
 			thisRange = rangeName
@@ -1299,10 +1418,13 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 			'y':item['y']
 			}
 
-		if item['z']:
-			data['z']= item['z']
-			data['scatterSize']=[i * 8 for i in item['z']]
-			data['color']=[i  for i in item['z']]
+		if item['extraData']:
+			data['z']= item['extraData']['z']
+			if 'inWatts' in  item['extraData'].keys(): 
+				data['inWatts']= item['extraData']['inWatts']
+				data['command']= item['extraData']['command']
+				data['scatterSize']=[i * 8 for i in item['extraData']['z']]
+				data['color']=[i  for i in item['extraData']['z']]
 
 
 
@@ -1313,7 +1435,7 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 
 		else:
 			scatterSize = 8
-			if item['z']:
+			if item['extraData']:
 				#scatterSize = 'scatterSize'
 				thisColor = {'field': 'z', 'transform': mapper}
 			else:
@@ -1366,6 +1488,53 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 	taptool = p.select(type=TapTool)
 	taptool.callback = tapCallback
 
-	show(p)
+	sliderCallback = CustomJS(args=dict(source=source, xRange=p.x_range, yRange=p.y_range, extraY=p.extra_y_ranges['default_range']), code="""
+	var xMin = parseFloat(xMinInput.value);
+	var xMax = parseFloat(xMaxInput.value);
+	var yMin = parseFloat(yMinInput.value);
+	var yMax = parseFloat(yMaxInput.value);
+
+	xRange.start = xMin;
+	xRange.end = xMax;
+
+	extraY.start = yMin;
+	yRange.start = yMin;
+	extraY.end = yMax;
+	yRange.end = yMax;
+	""")
+
+	yMaxInput = widgets.TextInput(value="8", title="Ymax", callback=sliderCallback)
+	sliderCallback.args['yMaxInput']=yMaxInput
+	yMinInput = widgets.TextInput(value="0", title="Ymin", callback=sliderCallback)
+	sliderCallback.args['yMinInput']=yMinInput
+	xMaxInput = widgets.TextInput(value="40000", title="xmax", callback=sliderCallback)
+	sliderCallback.args['xMaxInput']=xMaxInput
+	xMinInput = widgets.TextInput(value="0", title="xmin", callback=sliderCallback)
+	sliderCallback.args['xMinInput']=xMinInput
+	bookmarkInput = widgets.TextInput(value="", title="bookmark", callback=sliderCallback)
+	sliderCallback.args['bookmarkInput']=xMinInput
+
+	xMinChangeCB = CustomJS(args=dict(source=source, xRange=p.x_range, yRange=p.y_range, extraY=p.extra_y_ranges['default_range'], 
+		xMinInput=xMinInput, xMaxInput=xMaxInput, yMinInput=yMinInput, yMaxInput=yMaxInput, bookmarkInput=bookmarkInput), code="""
+	xMinInput.value = xRange.start.toString();
+	xMaxInput.value = xRange.end.toString();
+	yMinInput.value = yRange.start.toString();
+	yMaxInput.value = yRange.end.toString();
+	bookmarkInput.value = xRange.start.toString()+":"+ xRange.end.toString()+":"+ yRange.start.toString() + ":" + yRange.end.toString();
+	""")
+
+	p.x_range.js_on_change('start', xMinChangeCB)
+	p.x_range.js_on_change('end', xMinChangeCB)
+	p.y_range.js_on_change('start', xMinChangeCB)
+	p.y_range.js_on_change('end', xMinChangeCB)
+
+
+	layout = row(
+		p,
+		widgetbox(xMinInput, xMaxInput, yMinInput, yMaxInput, bookmarkInput),
+	)
+
+
+	show(layout)
 	reset_output()
 

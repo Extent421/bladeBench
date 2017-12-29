@@ -6,10 +6,30 @@
   <style>
    textarea { display: block; }
   </style>
-  <script>
+
+<script>
     onerror = function (msg) {
       log(msg);
     }
+
+  function sortSelect(selElem) {
+      var tmpAry = new Array();
+      for (var i=0;i<selElem.options.length;i++) {
+          tmpAry[i] = new Array();
+          tmpAry[i][0] = selElem.options[i].text;
+          tmpAry[i][1] = selElem.options[i].value;
+      }
+      tmpAry.sort();
+      while (selElem.options.length > 0) {
+          selElem.options[0] = null;
+      }
+      for (var i=0;i<tmpAry.length;i++) {
+          var op = new Option(tmpAry[i][0], tmpAry[i][1]);
+          selElem.options[i] = op;
+      }
+      return;
+  }
+    
     function log(msg) {
       var logger = document.getElementById('log');
       logger.appendChild(document.createTextNode(new Date() + '   ' + msg + '\n'));
@@ -36,18 +56,54 @@
         var option = document.createElement("option");
         var txt = document.createTextNode(filename);
         option.value = filename;
-		option.appendChild(txt);
+    		option.appendChild(txt);
         programlist.appendChild(option);
+        sortSelect(programlist);
       }
     function getSelectedFile(){
     	var index = document.getElementById('programList').selectedIndex;
     	if (index<0) return "";
         return document.getElementById('programList').options[index].value;
     }
-        </script>
+</script>
+
+
+
   <script>
    var socket;
    var dirListActive=false;
+
+   var tachSenseStats =[0,0];
+   var voltStats =[0,0];
+   var ampStats =[0,0];
+   var ampRawStats =[0,0];
+   var voltRawStats =[0,0];
+   var thrustStats =[0,0];
+   var thrustRawStats =[0,0];
+
+   function resetStats() {
+   tachSenseStats =[0,0];
+   voltStats =[0,0];
+   ampStats =[0,0];
+   ampRawStats =[0,0];
+   voltRawStats =[0,0];
+   thrustStats =[0,0];
+   thrustRawStats =[0,0];
+    document.getElementById('tachSense').textContent = tachSenseStats[0]/tachSenseStats[1];
+    document.getElementById('thrust').textContent = thrustStats[0]/thrustStats[1];
+    document.getElementById('thrustRaw').textContent = thrustRawStats[0]/thrustRawStats[1];
+    document.getElementById('volt').textContent = voltStats[0]/voltStats[1];
+    document.getElementById('voltRaw').textContent = voltRawStats[0]/voltRawStats[1];
+    document.getElementById('amp').textContent = ampStats[0]/ampStats[1];
+    document.getElementById('ampRaw').textContent = ampRawStats[0]/ampRawStats[1];
+
+   }
+
+   function fixedPrecision(number, precision){
+    var mult = Math.pow(10,precision);
+    return Math.round( (number*mult))/mult ;
+   }
+
    function connect() {
      var url = document.getElementById('url').value;
      var protocol = document.getElementById('protocol').value;
@@ -64,19 +120,71 @@
        //log('RCVD: ' + event.data);
         	 log('RCVD: ' + event.data);
         	 if (event.data.startsWith("<BeginDirList>")) {
-				dirListActive = true;
-				emptyDirList();
-				return;
+    				dirListActive = true;
+    				emptyDirList();
+    				return;
         	 }
         	 
         	 if (dirListActive){
             	 if (event.data.startsWith("<EndDirList>")) {
-     				dirListActive = false;
-     				return;
+                  dirListActive = false;
+                  return;
              	 }
             	 buildDirList(event.data);
         	 }
-        	 
+ 
+
+           if (event.data.startsWith("Tach sense")) {
+            var dSplit = event.data.split(":");
+            var value = parseFloat(dSplit[1]);
+            tachSenseStats[0]+=value;
+            tachSenseStats[1]+=1;
+            document.getElementById('tachSense').textContent = fixedPrecision(tachSenseStats[0]/tachSenseStats[1], 6);
+           }
+
+           if (event.data.startsWith("thrust")) {
+            var dSplit = event.data.split(":");
+            var vSplit = dSplit[1].split(" ");
+            var value = parseFloat(vSplit[0]);
+            var value2 = parseInt(vSplit[1]);
+            thrustStats[0]+=value;
+            thrustStats[1]+=1;
+            thrustRawStats[0]+=value2;
+            thrustRawStats[1]+=1;
+            document.getElementById('thrust').textContent = fixedPrecision(thrustStats[0]/thrustStats[1], 6);
+            document.getElementById('thrustRaw').textContent = fixedPrecision(thrustRawStats[0]/thrustRawStats[1], 1);
+           }
+
+           if (event.data.startsWith("volt")) {
+            var dSplit = event.data.split(":");
+            var vSplit = dSplit[1].split(" ");
+            var value = parseFloat(vSplit[0]);
+            var value2 = parseInt(vSplit[1]);
+            voltStats[0]+=value;
+            voltStats[1]+=1;
+            voltRawStats[0]+=value2;
+            voltRawStats[1]+=1;
+            document.getElementById('volt').textContent = fixedPrecision(voltStats[0]/voltStats[1], 6);
+            document.getElementById('voltRaw').textContent = fixedPrecision(voltRawStats[0]/voltRawStats[1], 1);
+            document.getElementById('statCount').textContent = voltStats[1];
+           }
+
+           if (event.data.startsWith("amp")) {
+            var dSplit = event.data.split(":");
+            var vSplit = dSplit[1].split(" ");
+            var value = parseFloat(vSplit[0]);
+            var value2 = parseInt(vSplit[1]);
+            ampStats[0]+=value;
+            ampStats[1]+=1;
+            ampRawStats[0]+=value2;
+            ampRawStats[1]+=1;
+            document.getElementById('amp').textContent = fixedPrecision(ampStats[0]/ampStats[1], 6);
+            document.getElementById('ampRaw').textContent = fixedPrecision(ampRawStats[0]/ampRawStats[1], 1);
+           }
+           
+
+
+
         	 logConsole(event.data);
         	 
      };
@@ -185,12 +293,14 @@
    }
    setInterval(update, 10);
   </script>
+
+
  </head>
  <body>
   <p>Status: <span id="readyState">-</span> <span id="status">Idle</span></p>
   <p>Buffer: <span id="bufferedAmount">-</span> bytes</p>
   <p>
-   <label>WebSocket URL: <input id="url" type="url" size="80" value="ws://10.0.2.127:81"></label>
+   <label>WebSocket URL: <input id="url" type="url" size="30" value="ws://10.0.2.127:81"></label>
    <label>Protocol: <input id="protocol" type="text" size="10" value=""></label>
    <input type=button value="Connect" onclick="connect()">
    <input type=button value="Disconnect" onclick="disconnect()">
@@ -200,14 +310,38 @@
    <input type=button value="Send" onclick="send()">
    <input type=button value="Ping" onclick="sendPing()">
   </p>
-  <p>
-   <input type=button value="list" onclick="sendList()">
-   <select id="programList" size="10" >
-	   <option value="program.txt">program.txt</option>
-   </select>
-   <input type=button value="run" onclick="sendRun()">
-   
-  </p>
+
+<table  style="width:100%">
+  <tr>
+    <td width="200">
+        <p>
+         <input type=button value="list" onclick="sendList()">
+         <select id="programList" size="10" >
+           <option value="program.txt">program.txt</option>
+         </select>
+         <input type=button value="run" onclick="sendRun()">
+         
+        </p>
+
+    </td>
+    <td >
+
+      count: <span id="statCount">-</span></br>
+      Tach sense: <span id="tachSense">-</span></br>
+      Volt: <span id="volt">-</span></br>
+      Volt raw: <span id="voltRaw">-</span></br>
+      Amp: <span id="amp">-</span></br>
+      Amp raw: <span id="ampRaw">-</span></br>
+      Thrust: <span id="thrust">-</span></br>
+      Thrust raw: <span id="thrustRaw">-</span></br>
+      <input type=button value="reset stats" onclick="resetStats()">
+
+
+    </td> 
+  </tr>
+
+</table>
+
   <p></p>
   <p>
   <input type=button value="test" onclick="sendTest()">
@@ -218,23 +352,19 @@
   <input type=button value="tlc" onclick="sendTLC()">
   <input type=button value="thc" onclick="sendTHC()">
   <input type=button value="tcc" onclick="sendTCC()">
-  </p>
+  </p> 
 
-      <p>reading value: <span id="readingValue">-</span></p>
-      <p>threshold value: <span id="threshValue">-</span></p>
-  
-
-  <table width="800" border="1">
+  <table width="750" border="0">
 	<tr>
       <td>        
-      	<pre>Time:</pre>
+      	<pre>console log:</pre>
         <textarea rows="25" cols="100" id="time"
         style="resize: none;" data-role="none"></textarea>
 	  </td>
     </tr>
     <tr>
       <td>
-        <pre>Log:</pre>
+        <pre>data:</pre>
         <textarea rows="25" cols="100" id="log"
         style="resize: none;" data-role="none"></textarea>
       </td>
