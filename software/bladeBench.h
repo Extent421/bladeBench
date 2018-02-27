@@ -2,11 +2,12 @@
 
 
 // command modes
-#define MODE_END	0	//stop test
-#define MODE_RAMP	1	//ramp speed over time
-#define MODE_HOLD	2	//hold steady speed
-#define MODE_TARE	3	//reset the scale
-#define MODE_TACH	4	//calibrate the tach
+#define MODE_END		0	//stop test
+#define MODE_RAMP		1	//ramp speed over time
+#define MODE_HOLD		2	//hold steady speed
+#define MODE_TARE		3	//reset the scale
+#define MODE_TACH		4	//calibrate the tach
+#define MODE_LOG_TACH	5	//calibrate the tach
 
 #define ABORT_NONE		0	//do not abort
 #define ABORT_TESTEND	1	//normal test end
@@ -26,6 +27,7 @@
 #define SAMPLE_T4			1<<9
 #define SAMPLE_TACH_INDEX	1<<10
 #define SAMPLE_CALIBRATE	1<<11
+#define SAMPLE_AUXCOMMAND	1<<12
 
 
 const unsigned int COMMANDBUFFER_SIZE = 100; //buffer for benchmark commands
@@ -78,6 +80,8 @@ struct rawSampleStruct {
 	long thrust = 0;
 	bool commandValuePresent = false;
 	uint16_t commandValue = 0;
+	bool auxValuePresent = false;
+	uint16_t auxValue = 0;
 	bool tachPulsePresent = false;
 	unsigned long tachPulse=0;
 	uint8_t tachIndex=0;

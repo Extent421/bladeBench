@@ -15,6 +15,8 @@
 #include <ADC.h>
 #include <i2c_t3.h>
 
+#include <SFE_BMP180.h>
+
 // File system object.
 SdFatSdioEX sd;
 
@@ -60,8 +62,7 @@ elapsedMicros commandTime;
 elapsedMillis lastTempReadingTimer;
 
 
-//uint8_t tachTriggerType = RISING;
-uint8_t tachTriggerType = RISING;
+uint8_t tachTriggerType = FALLING;
 
 elapsedMicros tachTime;
 volatile unsigned long lastTachPulse = 0;
@@ -75,6 +76,9 @@ ringIndexManager tachCalibrationIndex(2);
 volatile bool tachCalibrated = 0;
 volatile bool tachCalibrateRunning = 0;
 uint16_t tachCalibrationCount = 0;
+
+bool configLocked=false;
+
 
 uint8_t ADCAveraging = 4;
 
@@ -92,6 +96,8 @@ unsigned int overrunS = 0;
 
 ringIndexManager sampleBufferIndex(MAXSAMPLES);
 rawSampleStruct sampleBuffer[MAXSAMPLES];
+
+rawSampleStruct lastSampleValue;
 
 ringIndexManager tempIndex(4);
 const byte tempPins[4] = {T1_PIN,T2_PIN,T3_PIN,T4_PIN};
@@ -139,6 +145,19 @@ bool scReading = false;
 bool useDshot = false;
 
 
+uint16_t motorPully = 0;
+uint16_t drivePully = 0;
+
+
+SFE_BMP180 pressure;
+double envPressure = 0;
+double envTemperature = 0;
+
+unsigned long logTach[3] = {0,0,0};
+
+
+
+
 void setup() {
 
 
@@ -173,7 +192,7 @@ void setup() {
 
 	Serial.begin(115200);
 	//while (!Serial) {	}
-
+	delay(500);
 	Serial.println("starting up");
 	Serial5.begin(115200);
 
@@ -189,10 +208,10 @@ void setup() {
 
 	//setupLoadCell();
 
-	Wire2.begin(I2C_MASTER, 0x00, I2C_PINS_3_4, I2C_PULLUP_EXT, 400000);
-	Wire2.setDefaultTimeout(10000); // 10ms
-	enableWiper();
-	setWiper(350);
+	//Wire2.begin(I2C_MASTER, 0x00, I2C_PINS_3_4, I2C_PULLUP_EXT, 400000);
+	//Wire2.setDefaultTimeout(10000); // 10ms
+	//enableWiper();
+	//setWiper(350);
 
 	memset(serialCommand, 0, 256);
 
@@ -213,13 +232,82 @@ void setup() {
 	Serial.println(F("ready"));
 
 
+	  if (pressure.begin())
+	    Serial.println("BMP180 init success");
+	  else
+	  {
+	    Serial.println("BMP180 init fail (disconnected?)\n\n");
+	  }
+
+
+
+
 }
 
 void loop() {
-
 	handleSerialCommandInput();
-
 }
+
+double getPressure()
+{
+  char status;
+
+  // You must first get a temperature measurement to perform a pressure reading.
+
+  // Start a temperature measurement:
+  // If request is successful, the number of ms to wait is returned.
+  // If request is unsuccessful, 0 is returned.
+
+  status = pressure.startTemperature();
+  if (status != 0)
+  {
+    // Wait for the measurement to complete:
+
+    delay(status);
+
+    // Retrieve the completed temperature measurement:
+    // Note that the measurement is stored in the variable T.
+    // Use '&T' to provide the address of T to the function.
+    // Function returns 1 if successful, 0 if failure.
+
+    status = pressure.getTemperature(envTemperature);
+    if (status != 0)
+    {
+      // Start a pressure measurement:
+      // The parameter is the oversampling setting, from 0 to 3 (highest res, longest wait).
+      // If request is successful, the number of ms to wait is returned.
+      // If request is unsuccessful, 0 is returned.
+
+      status = pressure.startPressure(3);
+      if (status != 0)
+      {
+        // Wait for the measurement to complete:
+        delay(status);
+
+        // Retrieve the completed pressure measurement:
+        // Note that the measurement is stored in the variable P.
+        // Use '&P' to provide the address of P.
+        // Note also that the function requires the previous temperature measurement (T).
+        // (If temperature is stable, you can do one temperature measurement for a number of pressure measurements.)
+        // Function returns 1 if successful, 0 if failure.
+
+        status = pressure.getPressure(envPressure,envTemperature);
+
+        if (status != 0)
+        {
+        	envPressure = envPressure/10; //convert Mbar to kPa
+          return(envPressure);
+        }
+        else Serial5.println("error retrieving pressure measurement\n");
+      }
+      else Serial5.println("error starting pressure measurement\n");
+    }
+    else Serial5.println("error retrieving temperature measurement\n");
+  }
+  else Serial5.println("error starting temperature measurement\n");
+  return(-1);
+}
+
 
 void runCurrentCommand() {
 	uint16_t commandValue = 0;
@@ -316,6 +404,10 @@ void runCurrentCommand() {
 		//commandIndex++;
 		//runCurrentCommand();
 		break;
+	case MODE_LOG_TACH:
+		logTach[static_cast<int>(commandBuffer[commandIndex].value)] = lastSampleValue.tachPulse;
+		commandIndex++;
+		runCurrentCommand();
 	}
 }
 
@@ -369,6 +461,9 @@ void adc0_isr(void) {
 		sampleBuffer[sampleBufferIndex.write].volts = (uint16_t)ADCresult.result_adc1;
 		sampleBuffer[sampleBufferIndex.write].ampsPresent = true;
 		sampleBuffer[sampleBufferIndex.write].amps = (uint16_t)ADCresult.result_adc0;
+
+		lastSampleValue.volts = (uint16_t)ADCresult.result_adc1;
+		lastSampleValue.amps = (uint16_t)ADCresult.result_adc0;
 
 		sampleBuffer[sampleBufferIndex.write].ready = true;
 
@@ -498,6 +593,32 @@ void setSamplerADCSettings(){
     correctionFactor = vRef/adcMaxValue;
 }
 
+void zeroLogValues(){
+	for (unsigned int i=0; i<3; i++ ) {
+		logTach[i]=0;
+	}
+
+}
+
+void zeroLastSampleValue(){
+
+	lastSampleValue.time = 0;
+	lastSampleValue.T1 = 0;
+	lastSampleValue.T2 = 0;
+	lastSampleValue.T3 = 0;
+	lastSampleValue.T4 = 0;
+	lastSampleValue.thrust = 0;
+	lastSampleValue.commandValue = 0;
+	lastSampleValue.auxValue = 0;
+	lastSampleValue.tachPulse=0;
+	lastSampleValue.tachIndex=0;
+	lastSampleValue.calibrate = false;
+	lastSampleValue.volts = 0;
+	lastSampleValue.amps = 0;
+
+}
+
+
 void zeroSample(int index){
 	sampleBuffer[index].ready = false;
 	sampleBuffer[index].T1Present = false;
@@ -506,6 +627,7 @@ void zeroSample(int index){
 	sampleBuffer[index].T4Present = false;
 	sampleBuffer[index].thrustPresent = false;
 	sampleBuffer[index].commandValuePresent = false;
+	sampleBuffer[index].auxValuePresent = false;
 	sampleBuffer[index].tachPulsePresent = false;
 	sampleBuffer[index].voltsPresent = false;
 	sampleBuffer[index].ampsPresent = false;
@@ -584,22 +706,24 @@ void checkTempSenors(){
 
     correctionFactor = 3.3/adcMaxValue;
 
+	Serial5.println("Thermistor check:");
+
     for (unsigned int i=0; i<4; i++ ) {
 		rawTemp = (uint16_t)adc->analogRead(tempPins[i]);
-		Serial.print(rawTemp*correctionFactor);
-		Serial.print(" ");
+		Serial5.print(rawTemp*correctionFactor);
+		Serial5.print(" ");
 		if( (rawTemp*correctionFactor) > 3.0 ){
 			tempEnable[i]=false;
-			Serial.print("disabling ");
-			Serial.print(tempPins[i]);
-			Serial.print(" ");
-			Serial.println(i);
+			Serial5.print("disabling ");
+			Serial5.print(tempPins[i]);
+			Serial5.print(" ");
+			Serial5.println(i);
 		} else {
 			tempEnable[i]=true;
-			Serial.print("enabling ");
-			Serial.print(tempPins[i]);
-			Serial.print(" ");
-			Serial.println(i);
+			Serial5.print("enabling ");
+			Serial5.print(tempPins[i]);
+			Serial5.print(" ");
+			Serial5.println(i);
 
 		}
 	}
@@ -624,11 +748,13 @@ void getSample(){
     // check the loadcell for updates
 
     sampleBuffer[sampleBufferIndex.write].time = time;
+    lastSampleValue.time = time;
 
 	if (scaleUpdated){
 		scaleUpdated = false;
 		sampleBuffer[sampleBufferIndex.write].thrustPresent = true;
 		sampleBuffer[sampleBufferIndex.write].thrust = scaleValue;
+		lastSampleValue.thrust = scaleValue;
 	}
 
 
@@ -638,10 +764,19 @@ void getSample(){
 			//make note of the current command micros for the ESC
 			sampleBuffer[sampleBufferIndex.write].commandValuePresent = true;
 			sampleBuffer[sampleBufferIndex.write].commandValue = readDshot();
+			lastSampleValue.commandValue = readDshot();
 		}
 	} else {
 		sampleBuffer[sampleBufferIndex.write].commandValuePresent = true;
 		sampleBuffer[sampleBufferIndex.write].commandValue = ESC.readCommand();
+		lastSampleValue.commandValue = ESC.readCommand();
+	}
+
+	//aux output
+	if (auxValue > auxMinUsec){
+		sampleBuffer[sampleBufferIndex.write].auxValuePresent = true;
+		sampleBuffer[sampleBufferIndex.write].auxValue = ESC.readCommand();
+		lastSampleValue.auxValue = ESC.readCommand();
 	}
 
 	//RPM
@@ -650,6 +785,8 @@ void getSample(){
 		sampleBuffer[sampleBufferIndex.write].tachPulsePresent = true;
 		sampleBuffer[sampleBufferIndex.write].tachPulse = lastTachPulse;
 		sampleBuffer[sampleBufferIndex.write].tachIndex = tachCalibrationIndex.read+1;
+		lastSampleValue.tachPulse = lastTachPulse;
+		lastSampleValue.tachIndex = tachCalibrationIndex.read+1;
 
 		if(tachCalibrateRunning){
 			sampleBuffer[sampleBufferIndex.write].calibrate = true;
@@ -663,21 +800,25 @@ void getSample(){
 		tempUpdate[0] = false;
 		sampleBuffer[sampleBufferIndex.write].T1Present = true;
 		sampleBuffer[sampleBufferIndex.write].T1 = tempValues[0];
+		lastSampleValue.T1 = tempValues[0];
 	}
 	if(tempUpdate[1]){
 		tempUpdate[1] = false;
 		sampleBuffer[sampleBufferIndex.write].T2Present = true;
 		sampleBuffer[sampleBufferIndex.write].T2 = tempValues[1];
+		lastSampleValue.T2 = tempValues[1];
 	}
 	if(tempUpdate[2]){
 		tempUpdate[2] = false;
 		sampleBuffer[sampleBufferIndex.write].T3Present = true;
 		sampleBuffer[sampleBufferIndex.write].T3 = tempValues[2];
+		lastSampleValue.T3 = tempValues[2];
 	}
 	if(tempUpdate[3]){
 		tempUpdate[3] = false;
 		sampleBuffer[sampleBufferIndex.write].T4Present = true;
 		sampleBuffer[sampleBufferIndex.write].T4 = tempValues[3];
+		lastSampleValue.T4 = tempValues[3];
 	}
 }
 
@@ -943,9 +1084,13 @@ void doTestLog() {
 
 	digitalWrite(LED_PIN, 0);
 
-	loadConfig();
+	if(!configLocked){
+		loadConfig();
+	}
 	//loadProgram();
 	zeroSampleBuffers();
+	zeroLastSampleValue();
+	zeroLogValues();
 	sampleBufferIndex.reset();
 	overrunS = 0;
 	maxSampleBuffer = 0;
@@ -1009,14 +1154,14 @@ void doTestLog() {
 		while ( sampleBufferIndex.getFillLength() > 0  ){
 			maxSampleBuffer = max( sampleBufferIndex.getFillLength(), maxSampleBuffer);
 
-			ringIndexManager byteIndex(33);
+			ringIndexManager byteIndex(35);
 			byteIndex.reset();
 			// advance by 2 to leave room for bitmask
 			byteIndex.nextWrite();
 			byteIndex.nextWrite();
 
 			byteMap convert;
-			uint8_t allSample[29];
+			uint8_t allSample[31];
 			sampleMask = 0;
 
 			sampleMask |= SAMPLE_TIME;
@@ -1033,6 +1178,14 @@ void doTestLog() {
 			if (sampleBuffer[sampleBufferIndex.read].commandValuePresent){
 				sampleMask |= SAMPLE_MOTORCOMMAND;
 				convert.i[0] = sampleBuffer[sampleBufferIndex.read].commandValue;
+				allSample[byteIndex.write]=convert.uint8[0];
+				byteIndex.nextWrite();
+				allSample[byteIndex.write]=convert.uint8[1];
+				byteIndex.nextWrite();
+			}
+			if (sampleBuffer[sampleBufferIndex.read].auxValuePresent){
+				sampleMask |= SAMPLE_AUXCOMMAND;
+				convert.i[0] = sampleBuffer[sampleBufferIndex.read].auxValue;
 				allSample[byteIndex.write]=convert.uint8[0];
 				byteIndex.nextWrite();
 				allSample[byteIndex.write]=convert.uint8[1];
@@ -1135,7 +1288,7 @@ void doTestLog() {
 
 
 			if (!file.write(allSample, byteIndex.write) ) {
-				Serial.println("write data failed");
+				Serial5.println("write data failed");
 			}
 
 			zeroSample(sampleBufferIndex.read);
@@ -1173,21 +1326,23 @@ void doTestLog() {
 			detachInterrupt(TACH_PIN);
 			//add any tail info to the log file
 			logTail();
+			file.flush();
+			file.close();
 
-			Serial.print("longest loop ");
-			Serial.print(longestLoop);
-			Serial.print("/");
-			Serial.print(sampleRateMicros);
-			Serial.print(" ");
-			Serial.println((float)longestLoop/sampleRateMicros);
-			Serial.print("loop idle ");
-			Serial.print(idleTimeMin);
-			Serial.print("/");
-			Serial.println(idleTimeMax);
-			Serial.print("max samples ");
-			Serial.println(maxSampleBuffer);
-			Serial.print("bounce count ");
-			Serial.println(bounceCount);
+			Serial5.print("longest loop ");
+			Serial5.print(longestLoop);
+			Serial5.print("/");
+			Serial5.print(sampleRateMicros);
+			Serial5.print(" ");
+			Serial5.println((float)longestLoop/sampleRateMicros);
+			Serial5.print("loop idle ");
+			Serial5.print(idleTimeMin);
+			Serial5.print("/");
+			Serial5.println(idleTimeMax);
+			Serial5.print("max samples ");
+			Serial5.println(maxSampleBuffer);
+			Serial5.print("bounce count ");
+			Serial5.println(bounceCount);
 
 			float calibTotal = 0;
 			for(int i=0;i<10;i++){
@@ -1204,8 +1359,16 @@ void doTestLog() {
 				Serial.print("overS ");
 				Serial.println(overrunS);
 			}
-			file.flush();
-			file.close();
+
+			for (unsigned int i=0; i<3; i++ ) {
+				if (logTach[i]>0) {
+					Serial5.print("logValue TACH ");
+					Serial5.print(i);
+					Serial5.print(" ");
+					Serial5.println(logTach[i]);
+				}
+			}
+
 			running = false;
 
 		}
@@ -1214,23 +1377,20 @@ void doTestLog() {
 
     adc->disableInterrupts();
 
-	Serial.println("log completed");
+	Serial5.println("log completed");
 	digitalWrite(LED_PIN, 1);
 
 }
 
 void logHead(){
-	float ambientTemp;
 	char str[80];
 
-    adc->setAveraging(32, ADC_0); // set number of averages
-	rawTemp = (uint16_t)adc->analogRead(T1_PIN, ADC_0);
-    adc->setAveraging(2, ADC_0); // set number of averages
-
-    ambientTemp = getTemp(rawTemp);
+    getPressure();
 
 	file.write("log version: 3\n");
-	sprintf(str, "ambient temp: %.1f\n", ambientTemp );
+	sprintf(str, "ambient temp (C): %.1f\n", envTemperature );
+	file.write(str);
+	sprintf(str, "ambient pressure (kPa): %.1f\n", envPressure );
 	file.write(str);
 	sprintf(str, "pulse per rev: %i\n", pulsesPerRev );
 	file.write(str);
@@ -1252,6 +1412,10 @@ void logHead(){
 	file.write(str);
 	sprintf(str, "vref: %.2f\n", vRef );
 	file.write(str);
+	sprintf(str, "motorPully: %i\n", motorPully );
+	file.write(str);
+	sprintf(str, "drivePully: %i\n", drivePully );
+	file.write(str);
 	file.write("motor: \n");
 	file.write("ESC: \n");
 	file.write("settings: \n");
@@ -1263,7 +1427,7 @@ void logHead(){
 	file.write("\n");
 
 
-	file.write("Time,Motor Command,RPM,Volt,Amp,Thrust,T1,T2,T3,T4\n");
+	file.write("Time,Motor Command,Aux Command,RPM,Volt,Amp,Thrust,T1,T2,T3,T4\n");
 	file.write("Data Start:\n");
 
 }
@@ -1411,6 +1575,59 @@ void setSampleRate(uint16_t rate){
 	sampleRateMicros = (1.0/sampleRate)*1000000;
 }
 
+void dumpConfig() {
+
+    Serial5.print("commandUpdateRate: ");
+    Serial5.println(commandUpdateRate);
+    Serial5.print("auxCommandRate: ");
+    Serial5.println(auxCommandRate);
+    Serial5.print("auxMinUsec: ");
+    Serial5.println(auxMinUsec);
+    Serial5.print("auxMaxUsec: ");
+    Serial5.println(auxMaxUsec);
+    Serial5.print("motorPully: ");
+    Serial5.println(motorPully);
+    Serial5.print("drivePully: ");
+    Serial5.println(drivePully);
+    Serial5.print("sampleRate: ");
+    Serial5.println(sampleRate);
+    Serial5.print("tachTrigger: ");
+    Serial5.println(tachTriggerType);
+    Serial5.print("tachPulsePerRev: ");
+    Serial5.println(pulsesPerRev);
+    Serial5.print("tachDebounce: ");
+    Serial5.println(tachDebounce);
+    Serial5.print("thermBValue: ");
+    Serial5.println(thermBValue);
+    Serial5.print("tempShutDown: ");
+    Serial5.println(tempShutdownValue);
+    Serial5.print("loadCellCalibration: ");
+    Serial5.println(scaleCalibrationValue);
+    Serial5.print("ADCAveraging: ");
+    Serial5.println(ADCAveraging);
+    Serial5.print("vCalibrate3S: ");
+    Serial5.println(vCalibrate.cell3);
+    Serial5.print("vCalibrate4S: ");
+    Serial5.println(vCalibrate.cell4);
+    Serial5.print("vCalibrate5S: ");
+    Serial5.println(vCalibrate.cell5);
+    Serial5.print("vCalibrate6S: ");
+    Serial5.println(vCalibrate.cell6);
+    Serial5.print("aCalibrate: ");
+    Serial5.println(vCalibrate.amp);
+    Serial5.print("vOffset3S: ");
+    Serial5.println(vCalibrate.cell3Offset);
+    Serial5.print("vOffset4S: ");
+    Serial5.println(vCalibrate.cell4Offset);
+    Serial5.print("vOffset5S: ");
+    Serial5.println(vCalibrate.cell5Offset);
+    Serial5.print("vOffset6S: ");
+    Serial5.println(vCalibrate.cell6Offset);
+    Serial5.print("aOffset: ");
+    Serial5.println(vCalibrate.ampOffset);
+
+}
+
 void loadConfig() {
 	loadConfigFile("calibrate.cfg");
 	loadConfigFile("config.cfg");
@@ -1423,222 +1640,224 @@ void loadConfigFile(const char configFile[]) {
 	  const int line_buffer_size = 256;
 	  char buffer[line_buffer_size];
 
-	  char * propertyValue;
-	  float value;
 
 	  ifstream sdin(configFile);
       Serial.println("loading config");
 
 	  while (sdin.getline(buffer, line_buffer_size, '\n') || sdin.gcount()) {
-		  propertyValue=strchr(buffer,':');
-		  if (propertyValue!=NULL) propertyValue++;
 
-		  if (strncmp (buffer,"commandUpdateRate",strlen("commandUpdateRate")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting commandUpdateRate");
-		      setCommandUpdateRate( (uint16_t)value );
-		      continue;
-		    }
-		  if (strncmp (buffer,"auxCommandRate",strlen("auxCommandRate")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting auxCommandRate");
-		      setAuxCommandRate( (uint16_t)value );
-		      continue;
-		    }
-		  if (strncmp (buffer,"auxMinUsec",strlen("auxMinUsec")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting auxMinUsec");
-		      setAuxMinUsec( (uint16_t)value );
-		      continue;
-		    }
-		  if (strncmp (buffer,"auxMaxUsec",strlen("auxMaxUsec")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting auxMaxUsec");
-		      setAuxMaxUsec( (uint16_t)value );
-		      continue;
-		    }
-		  if (strncmp (buffer,"sampleRate",strlen("sampleRate")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting sampleRate");
-		      setSampleRate( (uint16_t)value );
-		      continue;
-		    }
-		  if (strncmp (buffer,"tachTrigger",strlen("tachTrigger")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  if (strncmp (propertyValue," FALLING",strlen(" FALLING")) == 0)
-			  {
-				  value = FALLING;
-			  } else if (strncmp (propertyValue," CHANGE",strlen(" CHANGE")) == 0)
-			  {
-				  value = CHANGE;
-			  } else
-			  {
-				  value = RISING;
-			  }
-		      tachTriggerType = value;
-		      Serial.print("setting tach trigger type ");
-		      Serial.println(tachTriggerType);
-		      continue;
-		    }		  
-		  if (strncmp (buffer,"tachPulsePerRev",strlen("tachPulsePerRev")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      pulsesPerRev = (uint8_t)value;
-		      tachCalibrationIndex = ringIndexManager(pulsesPerRev);
-		      Serial.print("setting tachPulsePerRev ");
-		      Serial.println(pulsesPerRev);
-
-		      continue;
-		    }
-		  if (strncmp (buffer,"tachDebounce",strlen("tachDebounce")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      tachDebounce = (uint16_t)value;
-		      Serial.print("setting tachDebounce ");
-		      Serial.println(tachDebounce);
-		      continue;
-		    }
-		  if (strncmp (buffer,"thermBValue",strlen("thermBValue")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-			  thermBValue = (uint16_t)value;
-		      Serial.print("setting thermBValue ");
-		      Serial.println(thermBValue);
-		      continue;
-		    }
-		  if (strncmp (buffer,"tempShutDown",strlen("tempShutDown")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-			  tempShutdownValue = getRawFromTemp( value );
-		      Serial.print("setting tempShutdownValue ");
-		      Serial.print(value);
-		      Serial.print(" ");
-		      Serial.println(tempShutdownValue);
-		      continue;
-		    }
-		  if (strncmp (buffer,"loadCellCalibration",strlen("loadCellCalibration")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting loadCellCalibration");
-		      scaleCalibrationValue = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"ADCAveraging",strlen("ADCAveraging")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting ADCAveraging");
-		      ADCAveraging = (uint8_t)value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"tachSensitivity",strlen("tachSensitivity")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting tachSensitivity");
-		      setWiper(value);
-		      continue;
-		    }
-		  if (strncmp (buffer,"vCalibrate3S",strlen("vCalibrate3S")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting vCalibrate3S");
-		      vCalibrate.cell3 = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"vCalibrate4S",strlen("vCalibrate4S")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting vCalibrate4S");
-		      vCalibrate.cell4 = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"vCalibrate5S",strlen("vCalibrate5S")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting vCalibrate5S");
-		      vCalibrate.cell5 = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"vCalibrate6S",strlen("vCalibrate6S")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting vCalibrate6S");
-		      vCalibrate.cell6 = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"vOffset3S",strlen("vOffset3S")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting vOffset3S");
-		      vCalibrate.cell3Offset = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"vOffset4S",strlen("vOffset4S")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting vOffset4S");
-		      vCalibrate.cell4Offset = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"vOffset5S",strlen("vOffset5S")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting vOffset5S");
-		      vCalibrate.cell5Offset = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"vOffset6S",strlen("vOffset6S")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting vOffset6S");
-		      vCalibrate.cell6Offset = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"aCalibrate",strlen("aCalibrate")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting aCalibrate");
-		      vCalibrate.amp = value;
-		      continue;
-		    }
-		  if (strncmp (buffer,"aOffset",strlen("aOffset")) == 0)
-		    {
-			  if (propertyValue==NULL) continue;
-			  value = atof(propertyValue);
-		      Serial.println("setting aOffset");
-		      vCalibrate.ampOffset = value;
-		      continue;
-		    }
+		  readConfigEntry(buffer);
 	  }
 
 	  sdin.close();
 }
+
+void readConfigEntry(char * buffer ){
+
+	  char * propertyValue;
+	  float value;
+
+	  propertyValue=strchr(buffer,':');
+	  if (propertyValue==NULL) return;
+	  propertyValue++;
+
+	  if (strncmp (buffer,"commandUpdateRate",strlen("commandUpdateRate")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting commandUpdateRate");
+	      setCommandUpdateRate( (uint16_t)value );
+	      return;
+	    }
+	  if (strncmp (buffer,"auxCommandRate",strlen("auxCommandRate")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting auxCommandRate");
+	      setAuxCommandRate( (uint16_t)value );
+	      return;
+	    }
+	  if (strncmp (buffer,"auxMinUsec",strlen("auxMinUsec")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting auxMinUsec");
+	      setAuxMinUsec( (uint16_t)value );
+	      return;
+	    }
+	  if (strncmp (buffer,"auxMaxUsec",strlen("auxMaxUsec")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting auxMaxUsec");
+	      setAuxMaxUsec( (uint16_t)value );
+	      return;
+	    }
+	  if (strncmp (buffer,"motorPully",strlen("motorPully")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting motorPully");
+	      motorPully = (uint16_t)value;
+	      return;
+	    }
+	  if (strncmp (buffer,"drivePully",strlen("drivePully")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting drivePully");
+	      drivePully = (uint16_t)value;
+	      return;
+	    }
+
+	  if (strncmp (buffer,"sampleRate",strlen("sampleRate")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting sampleRate");
+	      setSampleRate( (uint16_t)value );
+	      return;
+	    }
+	  if (strncmp (buffer,"tachTrigger",strlen("tachTrigger")) == 0)
+	    {
+		  if (strncmp (propertyValue," FALLING",strlen(" FALLING")) == 0)
+		  {
+			  value = FALLING;
+		  } else if (strncmp (propertyValue," CHANGE",strlen(" CHANGE")) == 0)
+		  {
+			  value = CHANGE;
+		  } else
+		  {
+			  value = RISING;
+		  }
+	      tachTriggerType = value;
+	      Serial.print("setting tach trigger type ");
+	      Serial.println(tachTriggerType);
+	      return;
+	    }
+	  if (strncmp (buffer,"tachPulsePerRev",strlen("tachPulsePerRev")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      pulsesPerRev = (uint8_t)value;
+	      tachCalibrationIndex = ringIndexManager(pulsesPerRev);
+	      Serial.print("setting tachPulsePerRev ");
+	      Serial.println(pulsesPerRev);
+	      return;
+	    }
+	  if (strncmp (buffer,"tachDebounce",strlen("tachDebounce")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      tachDebounce = (uint16_t)value;
+	      Serial.print("setting tachDebounce ");
+	      Serial.println(tachDebounce);
+	      return;
+	    }
+	  if (strncmp (buffer,"thermBValue",strlen("thermBValue")) == 0)
+	    {
+		  value = atof(propertyValue);
+		  thermBValue = (uint16_t)value;
+	      Serial.print("setting thermBValue ");
+	      Serial.println(thermBValue);
+	      return;
+	    }
+	  if (strncmp (buffer,"tempShutDown",strlen("tempShutDown")) == 0)
+	    {
+		  value = atof(propertyValue);
+		  tempShutdownValue = getRawFromTemp( value );
+	      Serial.print("setting tempShutdownValue ");
+	      Serial.print(value);
+	      Serial.print(" ");
+	      Serial.println(tempShutdownValue);
+	      return;
+	    }
+	  if (strncmp (buffer,"loadCellCalibration",strlen("loadCellCalibration")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting loadCellCalibration");
+	      scaleCalibrationValue = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"ADCAveraging",strlen("ADCAveraging")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting ADCAveraging");
+	      ADCAveraging = (uint8_t)value;
+	      return;
+	    }
+	  if (strncmp (buffer,"tachSensitivity",strlen("tachSensitivity")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting tachSensitivity");
+	      setWiper(value);
+	      return;
+	    }
+	  if (strncmp (buffer,"vCalibrate3S",strlen("vCalibrate3S")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting vCalibrate3S");
+	      vCalibrate.cell3 = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"vCalibrate4S",strlen("vCalibrate4S")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting vCalibrate4S");
+	      vCalibrate.cell4 = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"vCalibrate5S",strlen("vCalibrate5S")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting vCalibrate5S");
+	      vCalibrate.cell5 = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"vCalibrate6S",strlen("vCalibrate6S")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting vCalibrate6S");
+	      vCalibrate.cell6 = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"vOffset3S",strlen("vOffset3S")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting vOffset3S");
+	      vCalibrate.cell3Offset = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"vOffset4S",strlen("vOffset4S")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting vOffset4S");
+	      vCalibrate.cell4Offset = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"vOffset5S",strlen("vOffset5S")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting vOffset5S");
+	      vCalibrate.cell5Offset = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"vOffset6S",strlen("vOffset6S")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting vOffset6S");
+	      vCalibrate.cell6Offset = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"aCalibrate",strlen("aCalibrate")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting aCalibrate");
+	      vCalibrate.amp = value;
+	      return;
+	    }
+	  if (strncmp (buffer,"aOffset",strlen("aOffset")) == 0)
+	    {
+		  value = atof(propertyValue);
+	      Serial.println("setting aOffset");
+	      vCalibrate.ampOffset = value;
+	      return;
+	    }
+
+
+}
+
 
 
 void loadProgram(char * filename) {
@@ -1656,6 +1875,8 @@ void loadProgram(char * filename) {
 		float cValue = 0;
 		float cValue2 = -1;
 		bool cUseMicros = false;
+
+		uint8_t logMode = 0;
 
 		Serial5.print("loading program ");
 		Serial5.println(filename);
@@ -1788,6 +2009,31 @@ void loadProgram(char * filename) {
 				bufferIndex++;
 		      continue;
 		    }
+		  if (strncmp (buffer,"log",strlen("log")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+			  tokenPtr = strtok( propertyValue, " ");
+			  if (tokenPtr==NULL) continue;
+			  // look for the sample type to log
+			  if (strncmp (tokenPtr,"tach",strlen("tach")) == 0) {
+				  logMode = MODE_LOG_TACH;
+			  } else {
+				  logMode = 0;
+				  continue;
+			  }
+			  // get the log index
+			  tokenPtr = strtok( NULL, " ");
+			  if (tokenPtr==NULL) continue;
+
+			  cValue = atof(tokenPtr);
+
+				commandBuffer[bufferIndex].mode = logMode;
+				commandBuffer[bufferIndex].value = cValue;
+				Serial5.println( commandBuffer[bufferIndex].value);
+				commandBuffer[bufferIndex].useMicros = cUseMicros;
+				bufferIndex++;
+		      continue;
+		    }
 		  if (strncmp (buffer,"tare",strlen("tare")) == 0)
 		    {
 				commandBuffer[bufferIndex].mode = MODE_TARE;
@@ -1823,6 +2069,20 @@ void runSerialCommand(){
 	} else if (strncmp (serialCommand,"tcc",strlen("tcc")) == 0) {
 		Serial.println("got tcc");
 		tachCalibrateDelta();
+	} else if (strncmp (serialCommand,"cfg",strlen("cfg")) == 0) {
+		Serial.println("got config");
+		char* cfgString = serialCommand + strlen("cfg");
+		readConfigEntry(cfgString);
+	} else if (strncmp (serialCommand,"dumpConfig",strlen("dumpConfig")) == 0) {
+
+		Serial.println("got dumpConfig");
+		dumpConfig();
+
+	} else if (strncmp (serialCommand,"lockConfig",strlen("lockConfig")) == 0) {
+
+		Serial.println("got lockConfig");
+		configLocked = true;
+
 	} else if (strncmp (serialCommand,"run",strlen("run")) == 0) {
 
 		Serial.println("got run");
