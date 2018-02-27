@@ -13,7 +13,7 @@
         <property name="can_focus">False</property>
         <child>
           <object class="GtkEntry" id="refEntry">
-            <property name="width_request">168</property>
+            <property name="width_request">20</property>
             <property name="height_request">80</property>
             <property name="visible">True</property>
             <property name="can_focus">True</property>
@@ -26,21 +26,21 @@
           </packing>
         </child>
         <child>
-          <object class="GtkButton" id="button1">
-            <property name="label" translatable="yes">button</property>
+          <object class="GtkButton" id="bttnMakeChart">
+            <property name="label" translatable="yes">Make Chart</property>
             <property name="width_request">100</property>
-            <property name="height_request">80</property>
+            <property name="height_request">39</property>
             <property name="visible">True</property>
             <property name="can_focus">True</property>
             <property name="receives_default">True</property>
             <property name="halign">baseline</property>
-            <signal name="clicked" handler="testPressed" swapped="no"/>
+            <signal name="clicked" handler="doMakeChart" swapped="no"/>
             <signal name="drag-data-received" handler="got_data_ref" swapped="no"/>
             <signal name="drag-drop" handler="drop_cb" swapped="no"/>
           </object>
           <packing>
             <property name="x">22</property>
-            <property name="y">131</property>
+            <property name="y">130</property>
           </packing>
         </child>
         <child>
@@ -53,8 +53,8 @@
 </property>
           </object>
           <packing>
-            <property name="x">146</property>
-            <property name="y">198</property>
+            <property name="x">144</property>
+            <property name="y">199</property>
           </packing>
         </child>
         <child>
@@ -81,7 +81,7 @@
         <child>
           <object class="GtkScrolledWindow" id="scrolledwindow1">
             <property name="width_request">414</property>
-            <property name="height_request">165</property>
+            <property name="height_request">199</property>
             <property name="visible">True</property>
             <property name="can_focus">True</property>
             <property name="shadow_type">in</property>
@@ -131,12 +131,12 @@
           </object>
           <packing>
             <property name="x">16</property>
-            <property name="y">234</property>
+            <property name="y">280</property>
           </packing>
         </child>
         <child>
           <object class="GtkComboBoxText" id="modeBox">
-            <property name="width_request">133</property>
+            <property name="width_request">151</property>
             <property name="height_request">26</property>
             <property name="visible">True</property>
             <property name="can_focus">False</property>
@@ -145,7 +145,9 @@
               <item id="Thrust Over RPM" translatable="yes">thrust</item>
               <item id="Thrust Fitline" translatable="yes">thrust fit</item>
               <item id="Test Thrust" translatable="yes">test thrust</item>
+              <item id="Test Thrust Residual" translatable="yes">test thrust residual</item>
               <item id="Test Torque" translatable="yes">test torque</item>
+              <item id="Test Torque Residual" translatable="yes">test torque residual</item>
               <item id="Test Watts" translatable="yes">test watts</item>
               <item id="Thrust Over Throttle" translatable="yes">throttle thrust</item>
               <item id="Load" translatable="yes">load</item>
@@ -163,17 +165,21 @@
               <item id="Test A" translatable="yes">A</item>
               <item id="ARaw" translatable="yes">A raw</item>
               <item id="T1Raw" translatable="yes">T1 raw</item>
+              <item id="T2Raw" translatable="yes">T2 raw</item>
+              <item id="T4Raw" translatable="yes">T4 raw</item>
               <item id="Thrust Over T1" translatable="yes">Thrust over T1</item>
               <item id="Thrust Over V" translatable="yes">Thrust over V</item>
               <item id="commandRaw" translatable="yes">command Raw</item>
+              <item id="auxRaw" translatable="yes">aux Raw</item>
               <item id="overview" translatable="yes">overview</item>
               <item id="stats" translatable="yes">stats</item>
+              <item id="calibrationStats" translatable="yes">calibrationStats</item>
               <item id="rename" translatable="yes">rename</item>
             </items>
           </object>
           <packing>
-            <property name="x">235</property>
-            <property name="y">161</property>
+            <property name="x">231</property>
+            <property name="y">160</property>
           </packing>
         </child>
         <child>
@@ -187,13 +193,13 @@
           </object>
           <packing>
             <property name="x">195</property>
-            <property name="y">162</property>
+            <property name="y">166</property>
           </packing>
         </child>
         <child>
           <object class="GtkCheckButton" id="deltaCheck">
             <property name="label" translatable="yes">delta</property>
-            <property name="width_request">64</property>
+            <property name="width_request">56</property>
             <property name="height_request">25</property>
             <property name="visible">True</property>
             <property name="can_focus">True</property>
@@ -202,13 +208,13 @@
             <property name="draw_indicator">True</property>
           </object>
           <packing>
-            <property name="x">369</property>
-            <property name="y">164</property>
+            <property name="x">384</property>
+            <property name="y">161</property>
           </packing>
         </child>
         <child>
           <object class="GtkEntry" id="chartTitleEntry">
-            <property name="width_request">168</property>
+            <property name="width_request">111</property>
             <property name="height_request">37</property>
             <property name="visible">True</property>
             <property name="can_focus">True</property>
@@ -227,8 +233,53 @@
             <property name="label" translatable="yes">chart title</property>
           </object>
           <packing>
-            <property name="x">144</property>
-            <property name="y">124</property>
+            <property name="x">156</property>
+            <property name="y">126</property>
+          </packing>
+        </child>
+        <child>
+          <object class="GtkButton" id="bttnDumpProp">
+            <property name="label" translatable="yes">Dump Prop</property>
+            <property name="width_request">100</property>
+            <property name="height_request">20</property>
+            <property name="visible">True</property>
+            <property name="can_focus">True</property>
+            <property name="receives_default">True</property>
+            <signal name="clicked" handler="doDumpProp" swapped="no"/>
+          </object>
+          <packing>
+            <property name="x">22</property>
+            <property name="y">174</property>
+          </packing>
+        </child>
+        <child>
+          <object class="GtkButton" id="bttnClearAll">
+            <property name="label" translatable="yes">clear all</property>
+            <property name="width_request">29</property>
+            <property name="height_request">26</property>
+            <property name="visible">True</property>
+            <property name="can_focus">True</property>
+            <property name="receives_default">True</property>
+            <signal name="clicked" handler="doClearAll" swapped="no"/>
+          </object>
+          <packing>
+            <property name="x">15</property>
+            <property name="y">252</property>
+          </packing>
+        </child>
+        <child>
+          <object class="GtkButton" id="bttnDumpProp1">
+            <property name="label" translatable="yes">Integrate</property>
+            <property name="width_request">100</property>
+            <property name="height_request">20</property>
+            <property name="visible">True</property>
+            <property name="can_focus">True</property>
+            <property name="receives_default">True</property>
+            <signal name="clicked" handler="doIntegrateDumpProp" swapped="no"/>
+          </object>
+          <packing>
+            <property name="x">22</property>
+            <property name="y">201</property>
           </packing>
         </child>
       </object>

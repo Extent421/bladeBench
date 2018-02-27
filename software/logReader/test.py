@@ -25,18 +25,21 @@ class handler:
 		self.chartTitleEntry = builder.get_object("chartTitleEntry")
 		self.refPath = ''
 		self.fileList = []
+		self.logCache={}
 
 	def onDeleteWindow(self, *args):
 		Gtk.main_quit(*args)
 
-	def testPressed(self, button):
+	def doMakeChart(self, button):
 		patchLoad = None
 		propCharts = []
 		allCharts = []
 		allLabels= {'Thrust Over RPM':{'x':'RPM', 'y':'Thrust g', 'yScale':250, 'mode':'scatter'},
 					'Thrust Fitline':{'x':'RPM', 'y':'Thrust g', 'yScale':250, 'mode':'line'},
 					'Test Thrust':{'x':'Time', 'y':'Thrust g', 'yScale':250, 'mode':'scatter'},
+					'Test Thrust Residual':{'x':'Time', 'y':'Thrust g', 'yScale':250, 'mode':'scatter'},
 					'Test Torque':{'x':'Time', 'y':'Torque Ncm', 'yScale':10, 'mode':'scatter'},
+					'Test Torque Residual':{'x':'Time', 'y':'Torque Ncm', 'yScale':5, 'mode':'scatter'},
 					'Test Watts':{'x':'Time', 'y':'Watts', 'yScale':250, 'mode':'scatter'},
 					'Thrust Over Throttle':{'x':'Throttle', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
 					'RPM Over Throttle':{'x':'Throttle', 'y':'RPM', 'yScale':40000, 'mode':'scatter'},
@@ -55,12 +58,36 @@ class handler:
 					'VRaw':{'x':'Time', 'y':'Volts', 'yScale':20, 'mode':'scatter'},
 					'ARaw':{'x':'Time', 'y':'Amps', 'yScale':30, 'mode':'scatter'},
 					'T1Raw':{'x':'Time', 'y':'degrees C', 'yScale':30, 'yScaleDelta':20, 'mode':'scatter'},
+					'T2Raw':{'x':'Time', 'y':'degrees C', 'yScale':30, 'yScaleDelta':20, 'mode':'scatter'},
+					'T4Raw':{'x':'Time', 'y':'degrees C', 'yScale':30, 'yScaleDelta':20, 'mode':'scatter'},
 					'Thrust Over T1':{'x':'degrees C', 'y':'Thrust', 'yScale':300, 'mode':'scatter'},
 					'Thrust Over V':{'x':'Volts', 'y':'Thrust', 'yScale':300, 'mode':'scatter'},
 					'commandRaw':{'x':'Time', 'y':'Motor Command', 'yScale':2000, 'mode':'line'},
+					'auxRaw':{'x':'Time', 'y':'Aux Command', 'yScale':2000, 'mode':'line'},
 
 					}
 		mode = self.modeBox.get_active_id()
+
+		for row in self.fileList:
+			allPaths = []
+			allPaths.append( row['fullPath'][1:] )
+
+			for key in self.logCache.keys():
+				if key not in allPaths:
+					print 'expiring', key
+					del self.logCache[key]
+
+
+		if mode == 'Torque Over RPM':
+			idleValues=[]
+			for row in self.fileList:
+				path = row['fullPath'][1:]
+				sample, index = logReader.readBinaryLog(path, shortLoad = 5.1)
+				medVal = logReader.getIdleThrust(sample, index)
+				idleValues.append(medVal)
+			idleOffset = -(sum(idleValues))/len(idleValues)
+			print "found idle offset:", idleOffset
+
 
 		for row in self.fileList:
 			path = row['fullPath'][1:]
@@ -71,12 +98,17 @@ class handler:
 
 			if '.patch' in path:
 				patchFile = open(path, 'r')
-				patchLoad = json.load(patchFile)
+				tempPatch = json.load(patchFile)
 				patchFile.close()
+				patchLoad = {}
+				for key in tempPatch:
+					patchLoad[int(key)] = tempPatch[key]
+
 				continue
 
 			if '.prop' in path:
 				propFile = open(path, 'r')
+				propBase = os.path.basename(path)
 				propLoad = json.load(propFile)
 				propFile.close()
 				propCharts.append(propLoad)
@@ -86,10 +118,10 @@ class handler:
 
 				print 'loaded prop'
 				for item in propLoad:
-					print item
-					x.append( item['rpm'])
-					y.append( item['torque'])
-					z.append( item['thrust'])
+					if item['torque'] >= 0:
+						x.append( item['rpm'])
+						y.append( item['torque'])
+						z.append( item['thrust'])
 
 				extraData = {}
 				extraData['z'] = z
@@ -99,15 +131,22 @@ class handler:
 				thisChart['y']=y
 				thisChart['extraData']=extraData
 				thisChart['programName']='prop'
-				thisChart['label']='propLabel'
+				thisChart['label']=propBase.split('.')[0]
 				thisChart['mode']='line'
 				thisChart['extraRange']=False
 				allCharts.append(thisChart)
 
 				continue
 
-
+			'''if path not in self.logCache.keys():
+				print 'caching', path
+				sample, index = logReader.readBinaryLog(path)
+				self.logCache[path]= [ sample, index ]
+'''
 			sample, index = logReader.readBinaryLog(path)
+
+			#sample = self.logCache[path][0]
+			#index = self.logCache[path][1]
 			print 'charting for ', mode
 
 
@@ -115,20 +154,30 @@ class handler:
 			if mode == 'stats':
 				resultDict = logReader.getStats(sample,index)
 				return
+			if mode == 'calibrationStats':
+				resultDict = logReader.getCalibrationStats(sample,index)
+				return
 			elif mode == 'Thrust Over RPM':
 				x,y = logReader.getThrust(sample, index)
 			elif mode == 'Thrust Fitline':
 				x,y = logReader.getThrustFit(sample, index)
 			elif mode == 'Test Thrust':
 				x,y = logReader.getTestThrust(sample, index)
+			elif mode == 'Test Thrust Residual':
+				x,y = logReader.getTestThrustResidual(sample, index)
 			elif mode == 'Test Torque':
 				x,y = logReader.getTestThrust(sample, index)
+				y = [v*100 for v in y]  #Nm to Ncm
+			elif mode == 'Test Torque Residual':
+				x,y = logReader.getTestThrustResidual(sample, index)
 				y = [v*100 for v in y]  #Nm to Ncm
 			elif mode == 'Thrust Over Throttle':
 				x,y = logReader.getThrottleThrust(sample, index)
 			elif mode == 'RPM Over Throttle':
 				x,y = logReader.getRpmOverThrottle(sample, index)
 			elif mode == 'Test RPM':
+				x,y = logReader.getTestRpm(sample, index, deltaMode=deltaMode)
+			elif mode == 'Test RPM Raw':
 				x,y = logReader.getTestRpm(sample, index, deltaMode=deltaMode)
 			elif mode == 'Test Watts':
 				x,y = logReader.getTestWatts(sample, index)
@@ -144,7 +193,7 @@ class handler:
 			elif mode == 'MechEff':
 				x,y = logReader.getMechanicalEff(sample, index)
 			elif mode == 'Torque Over RPM':
-				x,y,extraData,programName = logReader.getTorqueOverRPM(sample, index)
+				x,y,extraData,programName = logReader.getTorqueOverRPM(sample, index, idleOffset)
 				y = [v*100 for v in y]  #Nm to Ncm
 			elif mode == 'Efficiency Over RPM':
 				x,y = logReader.getEfficiencyOverRPM(sample, index)
@@ -159,13 +208,19 @@ class handler:
 			elif mode == 'ARaw':
 				x,y = logReader.getTestAmpsRaw(sample, index)
 			elif mode == 'T1Raw':
-				x,y = logReader.getTestT1Raw(sample, index, deltaMode=deltaMode)
+				x,y = logReader.getTestTRaw(sample, index, deltaMode=deltaMode, sensor='T1')
+			elif mode == 'T2Raw':
+				x,y = logReader.getTestTRaw(sample, index, deltaMode=deltaMode, sensor='T2')
+			elif mode == 'T4Raw':
+				x,y = logReader.getTestTRaw(sample, index, deltaMode=deltaMode, sensor='T4')
 			elif mode == 'Thrust Over T1':
 				x,y = logReader.getThrustOverT1(sample, index)
 			elif mode == 'Thrust Over V':
 				x,y = logReader.getThrustOverV(sample, index)
 			elif mode == 'commandRaw':
-				x,y = logReader.getCommandRaw(sample, index)
+				x,y = logReader.getCommandRaw(sample, index, trace='Motor')
+			elif mode == 'auxRaw':
+				x,y = logReader.getCommandRaw(sample, index, trace='Aux')
 			elif mode == 'overview':
 				x,y = logReader.getCommandRaw(sample, index)
 				thisChart = {}
@@ -217,6 +272,47 @@ class handler:
 		if mode == 'rename': return
 
 		logReader.buildFigure(allCharts, allLabels[mode], deltaMode, self.chartTitleEntry.get_text(), mode=mode, patchLoad=patchLoad)
+
+	def doDumpProp(self, button):
+		for row in self.fileList:
+			path = row['fullPath'][1:]
+			label = row['label']
+
+			if '.patch' in path:
+				continue
+
+			if '.prop' in path:
+				continue
+
+			sample, index = logReader.readBinaryLog(path)
+
+			dump = logReader.createPropDump(sample, index)
+
+	def doIntegrateDumpProp(self, button):
+
+		thisProp = None
+		for row in self.fileList:
+			path = row['fullPath'][1:]
+			label = row['label']
+			if '.prop' in path:
+				propFile = open(path, 'r')
+				thisProp = json.load(propFile)
+				propFile.close()
+
+		if not thisProp:
+			print 'no prop dump found to integrate'
+			return
+
+		for row in self.fileList:
+			path = row['fullPath'][1:]
+			if '.patch' in path:
+				continue
+			if '.prop' in path:
+				continue
+
+			sample, index = logReader.readBinaryLog(path)
+
+			thisProp = logReader.integratePropDump(sample, index, thisProp)
 
 
 
@@ -270,6 +366,11 @@ class handler:
 		self.grid.remove_row(rowIndex)
 		del self.fileList[rowIndex]
 
+	def doClearAll(self, button):
+		while len(self.fileList):
+			self.grid.remove_row(0)
+			del self.fileList[0]
+
 	def write(self, data):
 		buffer = self.log.get_buffer()
 		iter = buffer.get_end_iter()
@@ -284,7 +385,9 @@ builder = Gtk.Builder()
 builder.add_from_file("./logReader/testWin.glade")
 label = builder.get_object("label1")
 window = builder.get_object("window1")
-button = builder.get_object("button1")
+button = builder.get_object("bttnMakeChart")
+clearAll = builder.get_object("bttnClearAll")
+dumpChart = builder.get_object("bttnDumpChart")
 entry = builder.get_object("refEntry")
 window.drag_dest_set(0, [], 0)
 button.drag_dest_set(0, [], 0)
