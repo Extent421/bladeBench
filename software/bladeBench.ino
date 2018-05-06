@@ -89,7 +89,7 @@ uint8_t abortReason = ABORT_NONE;
 float motorValue=0;
 float auxValue=0;
 
-const uint16_t MAXSAMPLES = 4000; //number of blocks in the ring buffer
+const uint16_t MAXSAMPLES = 5250; //number of blocks in the ring buffer
 
 // ring buffer indexes
 unsigned int overrunS = 0;
@@ -104,6 +104,9 @@ const byte tempPins[4] = {T1_PIN,T2_PIN,T3_PIN,T4_PIN};
 volatile uint16_t tempValues[4] = {0,0,0,0};
 volatile bool tempUpdate[4] = {false,false,false,false};
 volatile bool tempEnable[4] = {false,false,false,false};
+
+uint8_t markerID=0;
+
 uint16_t thermBValue = 3435;
 
 uint16_t commandUpdateRate = 333; // ESC update in hz
@@ -117,7 +120,7 @@ uint16_t auxCommandRate = 50; // Aux servo update in hz
 uint32_t auxCommandRateMicros = (1.0/auxCommandRate)*1000000;
 uint16_t auxMinUsec = 1000;
 uint16_t auxMaxUsec = 1500;
-
+bool auxEnable = false;
 
 
 uint16_t sampleRate = 1000; // log sampler rate in hz
@@ -408,6 +411,12 @@ void runCurrentCommand() {
 		logTach[static_cast<int>(commandBuffer[commandIndex].value)] = lastSampleValue.tachPulse;
 		commandIndex++;
 		runCurrentCommand();
+		break;
+	case MODE_MARKER:
+		markerID = static_cast<uint8_t>(commandBuffer[commandIndex].value);
+		commandIndex++;
+		runCurrentCommand();
+		break;
 	}
 }
 
@@ -475,11 +484,12 @@ void adc0_isr(void) {
 
 
 	} else if(loadSamplerActive){
+		// read the load cell
 		scaleUpdated = true;
 		loadSamplerActive = false;
 		scaleValue=(uint16_t)adc->adc0->readSingle();
 
-
+		// fire off the temperature read
 		if (lastTempReadingTimer > 1){
 			if ( tempEnable[tempIndex.write]){
 				adc->adc0->startSingleRead(tempPins[tempIndex.write]);
@@ -604,9 +614,6 @@ void zeroLastSampleValue(){
 
 	lastSampleValue.time = 0;
 	lastSampleValue.T1 = 0;
-	lastSampleValue.T2 = 0;
-	lastSampleValue.T3 = 0;
-	lastSampleValue.T4 = 0;
 	lastSampleValue.thrust = 0;
 	lastSampleValue.commandValue = 0;
 	lastSampleValue.auxValue = 0;
@@ -622,9 +629,6 @@ void zeroLastSampleValue(){
 void zeroSample(int index){
 	sampleBuffer[index].ready = false;
 	sampleBuffer[index].T1Present = false;
-	sampleBuffer[index].T2Present = false;
-	sampleBuffer[index].T3Present = false;
-	sampleBuffer[index].T4Present = false;
 	sampleBuffer[index].thrustPresent = false;
 	sampleBuffer[index].commandValuePresent = false;
 	sampleBuffer[index].auxValuePresent = false;
@@ -633,6 +637,8 @@ void zeroSample(int index){
 	sampleBuffer[index].ampsPresent = false;
 	sampleBuffer[index].calibrate = false;
 	sampleBuffer[index].tachIndex = 0;
+	sampleBuffer[index].markerID = 0;
+
 }
 
 void zeroSampleBuffers(){
@@ -651,6 +657,16 @@ void resetCommandBuffer(){
 		commandBuffer[i].value2 = -1;
 		commandBuffer[i].useMicros = false;
 	}
+}
+
+void resetOutstandingSample(){
+	scaleUpdated = false;
+	tachUpdate = false;
+	markerID = 0;
+	for (unsigned int i=0; i<4; i++ ) {
+		tempUpdate[i]=false;
+	}
+
 }
 
 void vbatAutorange(){
@@ -773,10 +789,10 @@ void getSample(){
 	}
 
 	//aux output
-	if (auxValue > auxMinUsec){
+	if (auxEnable){
 		sampleBuffer[sampleBufferIndex.write].auxValuePresent = true;
-		sampleBuffer[sampleBufferIndex.write].auxValue = ESC.readCommand();
-		lastSampleValue.auxValue = ESC.readCommand();
+		sampleBuffer[sampleBufferIndex.write].auxValue = AUX.readCommand();
+		lastSampleValue.auxValue = AUX.readCommand();
 	}
 
 	//RPM
@@ -796,30 +812,21 @@ void getSample(){
 
 
 	//temp probes
-	if(tempUpdate[0]){
-		tempUpdate[0] = false;
+	tempIndex.nextRead();
+	if(tempUpdate[tempIndex.read]){
+		tempUpdate[tempIndex.read] = false;
 		sampleBuffer[sampleBufferIndex.write].T1Present = true;
-		sampleBuffer[sampleBufferIndex.write].T1 = tempValues[0];
+		sampleBuffer[sampleBufferIndex.write].T1 = tempValues[tempIndex.read];
+		sampleBuffer[sampleBufferIndex.write].tIndex = tempIndex.read+1;
 		lastSampleValue.T1 = tempValues[0];
+		lastSampleValue.tIndex = tempIndex.read+1;
 	}
-	if(tempUpdate[1]){
-		tempUpdate[1] = false;
-		sampleBuffer[sampleBufferIndex.write].T2Present = true;
-		sampleBuffer[sampleBufferIndex.write].T2 = tempValues[1];
-		lastSampleValue.T2 = tempValues[1];
+
+	if(markerID>0){
+		sampleBuffer[sampleBufferIndex.write].markerID = markerID;
+		markerID = 0;
 	}
-	if(tempUpdate[2]){
-		tempUpdate[2] = false;
-		sampleBuffer[sampleBufferIndex.write].T3Present = true;
-		sampleBuffer[sampleBufferIndex.write].T3 = tempValues[2];
-		lastSampleValue.T3 = tempValues[2];
-	}
-	if(tempUpdate[3]){
-		tempUpdate[3] = false;
-		sampleBuffer[sampleBufferIndex.write].T4Present = true;
-		sampleBuffer[sampleBufferIndex.write].T4 = tempValues[3];
-		lastSampleValue.T4 = tempValues[3];
-	}
+
 }
 
 void statFunc() {
@@ -1084,6 +1091,8 @@ void doTestLog() {
 
 	digitalWrite(LED_PIN, 0);
 
+	AUX.writeMicroseconds(auxMinUsec);
+
 	if(!configLocked){
 		loadConfig();
 	}
@@ -1091,6 +1100,7 @@ void doTestLog() {
 	zeroSampleBuffers();
 	zeroLastSampleValue();
 	zeroLogValues();
+	resetOutstandingSample();
 	sampleBufferIndex.reset();
 	overrunS = 0;
 	maxSampleBuffer = 0;
@@ -1154,14 +1164,14 @@ void doTestLog() {
 		while ( sampleBufferIndex.getFillLength() > 0  ){
 			maxSampleBuffer = max( sampleBufferIndex.getFillLength(), maxSampleBuffer);
 
-			ringIndexManager byteIndex(35);
+			ringIndexManager byteIndex(30);
 			byteIndex.reset();
 			// advance by 2 to leave room for bitmask
 			byteIndex.nextWrite();
 			byteIndex.nextWrite();
 
 			byteMap convert;
-			uint8_t allSample[31];
+			uint8_t allSample[26];
 			sampleMask = 0;
 
 			sampleMask |= SAMPLE_TIME;
@@ -1247,6 +1257,8 @@ void doTestLog() {
 
 			if (sampleBuffer[sampleBufferIndex.read].T1Present){
 				sampleMask |= SAMPLE_T1;
+				allSample[byteIndex.write]=sampleBuffer[sampleBufferIndex.read].tIndex;
+				byteIndex.nextWrite();
 				convert.uint16[0] = sampleBuffer[sampleBufferIndex.read].T1;
 				allSample[byteIndex.write]=convert.uint8[0];
 				byteIndex.nextWrite();
@@ -1254,31 +1266,11 @@ void doTestLog() {
 				byteIndex.nextWrite();
 			}
 
-			if (sampleBuffer[sampleBufferIndex.read].T2Present){
-				sampleMask |= SAMPLE_T2;
-				convert.uint16[0] = sampleBuffer[sampleBufferIndex.read].T2;
-				allSample[byteIndex.write]=convert.uint8[0];
+			if (sampleBuffer[sampleBufferIndex.read].markerID > 0){
+				sampleMask |= SAMPLE_MARKER;
+				allSample[byteIndex.write]=sampleBuffer[sampleBufferIndex.read].markerID;
 				byteIndex.nextWrite();
-				allSample[byteIndex.write]=convert.uint8[1];
-				byteIndex.nextWrite();
-			}
 
-			if (sampleBuffer[sampleBufferIndex.read].T3Present){
-				sampleMask |= SAMPLE_T3;
-				convert.uint16[0] = sampleBuffer[sampleBufferIndex.read].T3;
-				allSample[byteIndex.write]=convert.uint8[0];
-				byteIndex.nextWrite();
-				allSample[byteIndex.write]=convert.uint8[1];
-				byteIndex.nextWrite();
-			}
-
-			if (sampleBuffer[sampleBufferIndex.read].T4Present){
-				sampleMask |= SAMPLE_T4;
-				convert.uint16[0] = sampleBuffer[sampleBufferIndex.read].T4;
-				allSample[byteIndex.write]=convert.uint8[0];
-				byteIndex.nextWrite();
-				allSample[byteIndex.write]=convert.uint8[1];
-				byteIndex.nextWrite();
 			}
 
 			//fill in the bitmask
@@ -1387,7 +1379,7 @@ void logHead(){
 
     getPressure();
 
-	file.write("log version: 3\n");
+	file.write("log version: 4\n");
 	sprintf(str, "ambient temp (C): %.1f\n", envTemperature );
 	file.write(str);
 	sprintf(str, "ambient pressure (kPa): %.1f\n", envPressure );
@@ -1427,7 +1419,7 @@ void logHead(){
 	file.write("\n");
 
 
-	file.write("Time,Motor Command,Aux Command,RPM,Volt,Amp,Thrust,T1,T2,T3,T4\n");
+	file.write("Time,Motor Command,Aux Command,RPM,Volt,Amp,Thrust,tID,T1\n");
 	file.write("Data Start:\n");
 
 }
@@ -1864,26 +1856,29 @@ void loadProgram(char * filename) {
 	if (!sd.begin()) sd.initErrorHalt("SdFatSdioEX begin failed");
 	sd.chvol();
 
-		const int line_buffer_size = 256;
-		char buffer[line_buffer_size];
+	const int line_buffer_size = 256;
+	char buffer[line_buffer_size];
 
-		char * propertyValue;
-		char * tokenPtr;
-		char * midTokenPtr;
+	char * propertyValue;
+	char * tokenPtr;
+	char * midTokenPtr;
 
-		unsigned long cTime = 0;
-		float cValue = 0;
-		float cValue2 = -1;
-		bool cUseMicros = false;
+	unsigned long cTime = 0;
+	float cValue = 0;
+	float cValue2 = -1;
+	bool cUseMicros = false;
 
-		uint8_t logMode = 0;
+	uint8_t logMode = 0;
 
-		Serial5.print("loading program ");
-		Serial5.println(filename);
-		ifstream sdin(filename);
+	Serial5.print("loading program ");
+	Serial5.println(filename);
+	ifstream sdin(filename);
 
-		resetCommandBuffer();
-		unsigned int bufferIndex = 0;
+	resetCommandBuffer();
+	unsigned int bufferIndex = 0;
+
+	auxEnable = false;
+
 
 	  while (sdin.getline(buffer, line_buffer_size, '\n') || sdin.gcount()) {
 		  if (bufferIndex >= COMMANDBUFFER_SIZE-1) break; //drop commands if there are too many, always leave room for the end test command.
@@ -1911,6 +1906,7 @@ void loadProgram(char * filename) {
 			  } else {
 				  //If it exists assume dual servo output command
 				  cValue2 = atof(midTokenPtr);
+				  auxEnable = true;
 			  }
 
 			  cTime = strtoul(tokenPtr, NULL, 0);
@@ -1957,6 +1953,8 @@ void loadProgram(char * filename) {
 			  } else {
 				  //If it exists assume dual servo output command
 				  cValue2 = atof(midTokenPtr);
+				  auxEnable = true;
+
 			  }
 
 			  cTime = strtoul(tokenPtr, NULL, 0);
@@ -2030,7 +2028,20 @@ void loadProgram(char * filename) {
 				commandBuffer[bufferIndex].mode = logMode;
 				commandBuffer[bufferIndex].value = cValue;
 				Serial5.println( commandBuffer[bufferIndex].value);
-				commandBuffer[bufferIndex].useMicros = cUseMicros;
+				bufferIndex++;
+		      continue;
+		    }
+		  if (strncmp (buffer,"marker",strlen("marker")) == 0)
+		    {
+			  if (propertyValue==NULL) continue;
+				tokenPtr = strtok( propertyValue, " ");
+				if (tokenPtr==NULL) continue;
+
+				cValue = atof(tokenPtr);
+
+				commandBuffer[bufferIndex].mode = MODE_MARKER;
+				commandBuffer[bufferIndex].value = cValue;
+				Serial5.println( commandBuffer[bufferIndex].value);
 				bufferIndex++;
 		      continue;
 		    }

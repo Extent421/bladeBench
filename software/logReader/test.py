@@ -8,6 +8,7 @@ import time
 import json
 
 import shutil
+import numpy
 
 sys.path.insert(0, os.path.abspath(".."))
 from . import logReader
@@ -32,8 +33,11 @@ class handler:
 
 	def doMakeChart(self, button):
 		patchLoad = None
+		torqueLoad = None
+		propLoad = None
 		propCharts = []
 		allCharts = []
+		torqueDump = []
 		allLabels= {'Thrust Over RPM':{'x':'RPM', 'y':'Thrust g', 'yScale':250, 'mode':'scatter'},
 					'Thrust Fitline':{'x':'RPM', 'y':'Thrust g', 'yScale':250, 'mode':'line'},
 					'Test Thrust':{'x':'Time', 'y':'Thrust g', 'yScale':250, 'mode':'scatter'},
@@ -49,6 +53,8 @@ class handler:
 					'Watts':{'x':'Watts', 'y':'Thrust', 'yScale':250, 'mode':'scatter'},
 					'MechPower':{'x':'Watts', 'y':'Time', 'yScale':250, 'mode':'scatter'},
 					'Torque Over RPM':{'x':'RPM', 'y':'Torque Ncm', 'yScale':10, 'mode':'scatter'},
+					'Inertia':{'x':'Time', 'y':'Inertia g cm^2', 'yScale':40, 'mode':'scatter'},
+					'InertiaSingle':{'x':'Time', 'y':'Inertia g cm^2', 'yScale':40, 'mode':'scatter'},
 					'MechEff':{'x':'Time', 'y':'Efficiency', 'yScale':1, 'mode':'scatter'},
 					'Efficiency Over RPM':{'x':'RPM', 'y':'G/W', 'yScale':10, 'mode':'scatter'},
 					'Efficiency Over Throttle':{'x':'Throttle', 'y':'G/W', 'yScale':10, 'mode':'scatter'},
@@ -68,6 +74,42 @@ class handler:
 					}
 		mode = self.modeBox.get_active_id()
 
+		#preload 
+		for row in self.fileList:
+			path = row['fullPath'][1:]
+			label = row['label']
+
+			if '.patch' in path:
+				patchFile = open(path, 'r')
+				tempPatch = json.load(patchFile)
+				patchFile.close()
+				patchLoad = {}
+				for key in tempPatch:
+					patchLoad[int(key)] = tempPatch[key]
+				print 'loaded patch', path
+				continue
+
+			if '.torque' in path:
+				torqueFile = open(path, 'r')
+				tempTorque = json.load(torqueFile)
+				torqueFile.close()
+				torqueLoad = {}
+				for key in tempTorque:
+					torqueLoad[int(key)] = tempTorque[key]
+				print 'loaded torque', path
+
+				continue
+
+			if '.prop' in path:
+				if mode == 'Inertia':
+					propFile = open(path, 'r')
+					propBase = os.path.basename(path)
+					propLoad = json.load(propFile)
+					propFile.close()
+				continue
+
+
+
 		for row in self.fileList:
 			allPaths = []
 			allPaths.append( row['fullPath'][1:] )
@@ -82,10 +124,16 @@ class handler:
 			idleValues=[]
 			for row in self.fileList:
 				path = row['fullPath'][1:]
+				if '.patch' in path: continue
+				if '.prop' in path: continue
+
 				sample, index = logReader.readBinaryLog(path, shortLoad = 5.1)
 				medVal = logReader.getIdleThrust(sample, index)
 				idleValues.append(medVal)
-			idleOffset = -(sum(idleValues))/len(idleValues)
+
+			idleOffset = 0
+			if idleValues:
+				idleOffset = -(sum(idleValues))/len(idleValues)
 			print "found idle offset:", idleOffset
 
 
@@ -97,13 +145,9 @@ class handler:
 			deltaMode = self.deltaCheck.get_active()
 
 			if '.patch' in path:
-				patchFile = open(path, 'r')
-				tempPatch = json.load(patchFile)
-				patchFile.close()
-				patchLoad = {}
-				for key in tempPatch:
-					patchLoad[int(key)] = tempPatch[key]
+				continue
 
+			if '.torque' in path:
 				continue
 
 			if '.prop' in path:
@@ -112,6 +156,10 @@ class handler:
 				propLoad = json.load(propFile)
 				propFile.close()
 				propCharts.append(propLoad)
+
+				if mode == 'Inertia': continue
+
+
 				x = []
 				y = []
 				z = []
@@ -129,13 +177,19 @@ class handler:
 				thisChart = {}
 				thisChart['x']=x
 				thisChart['y']=y
+
+				thisChart['data'] = {}
+				thisChart['data']['x']=x
+				thisChart['data']['y']=y
+				thisChart['data']['thrust_g']=z
+
+
 				thisChart['extraData']=extraData
 				thisChart['programName']='prop'
 				thisChart['label']=propBase.split('.')[0]
 				thisChart['mode']='line'
 				thisChart['extraRange']=False
 				allCharts.append(thisChart)
-
 				continue
 
 			'''if path not in self.logCache.keys():
@@ -143,6 +197,25 @@ class handler:
 				sample, index = logReader.readBinaryLog(path)
 				self.logCache[path]= [ sample, index ]
 '''
+
+
+			if mode == 'rename':
+				thisLog = logReader.bladeBenchLog(path)
+				fullProgramName = thisLog.getProgramName()
+				programName = fullProgramName.split('.')[0]
+				dir = os.path.dirname(path)
+				targetPath = os.path.join(dir, programName+'.txt')
+				increment = 0
+				while os.path.isfile(targetPath):
+					increment = increment + 1
+					targetPath = os.path.join(dir, programName+'('+ str(increment) +').txt')
+					if increment >100: break
+
+				print 'copying from', path, 'to', targetPath
+				shutil.copyfile(path, targetPath)
+				continue
+
+
 			sample, index = logReader.readBinaryLog(path)
 
 			#sample = self.logCache[path][0]
@@ -195,6 +268,15 @@ class handler:
 			elif mode == 'Torque Over RPM':
 				x,y,extraData,programName = logReader.getTorqueOverRPM(sample, index, idleOffset)
 				y = [v*100 for v in y]  #Nm to Ncm
+			elif mode == 'Inertia':
+				x,y = logReader.getInertia(sample, index, torqueLoad, propLoad)
+				print 'Inertia Stats, min, max, med, mean'
+				print round(min(y),4), round(max(y),4),round( numpy.median(y),4), round(numpy.mean(y),4)
+			elif mode == 'InertiaSingle':
+				x,y = logReader.getInertiaSingle(sample, index)
+				print 'Inertia Stats, min, max, med, mean'
+				print round(min(y),4), round(max(y),4),round( numpy.median(y),4), round(numpy.mean(y),4)
+
 			elif mode == 'Efficiency Over RPM':
 				x,y = logReader.getEfficiencyOverRPM(sample, index)
 			elif mode == 'Efficiency Over Throttle':
@@ -243,24 +325,13 @@ class handler:
 				allCharts.append(thisChart)
 
 				x,y = logReader.getTestAmps(sample, index)
-			elif mode == 'rename':
-				fullProgramName = sample[0]['programName']
-				programName = fullProgramName.split('.')[0]
-				dir = os.path.dirname(path)
-				targetPath = os.path.join(dir, programName+'.txt')
-				increment = 0
-				while os.path.isfile(targetPath):
-					increment = increment + 1
-					targetPath = os.path.join(dir, programName+'('+ str(increment) +').txt')
-					if increment >100: break
-
-				print 'copying from', path, 'to', targetPath
-				shutil.copyfile(path, targetPath)
-				continue
 
 			thisChart = {}
+			thisChart['data'] = {}
 			thisChart['x']=x
 			thisChart['y']=y
+			thisChart['data']['x']=x
+			thisChart['data']['y']=y
 			thisChart['extraData']=extraData
 			thisChart['programName']=programName
 			thisChart['label']=label
@@ -268,8 +339,47 @@ class handler:
 			print 'set Mode to', thisChart['mode']
 			thisChart['extraRange']=False
 			allCharts.append(thisChart)
+			if mode == 'Torque Over RPM':
+				torqueDump.append(thisChart)
 
 		if mode == 'rename': return
+
+		if mode == 'Torque Over RPM':
+			torqueDict = {}
+			staticLoad = []
+			for chart in torqueDump:
+				try:
+					throttle = int(chart['programName'].split('_')[0])
+				except:
+					throttle = 0
+				torqueDict[throttle]=[]
+				staticLoad.append( {
+					'rpm':int( round( chart['x'][0] )),
+					'thrust':0,
+					'command':(throttle/100.0)*2000,
+					'torque':round(chart['y'][0], 4 )
+				})
+
+				for index in range(0,len(chart['x'])):
+					thisPoint = {}
+					thisPoint['rpm']=int( round( chart['x'][index] ) )
+					thisPoint['torque']=round( chart['y'][index], 4 )
+					thisPoint['inWatts']=round( chart['extraData']['inWatts'][index], 1 )
+					thisPoint['eff']=round( chart['extraData']['z'][index], 2 )
+					torqueDict[throttle].append(thisPoint)
+
+			staticLoad.sort(key=lambda x: x['command']  )
+
+
+			dumpFile = open('last.torque', 'w')
+			json.dump(torqueDict, dumpFile, sort_keys=True, indent=4, separators=(',', ': '))
+			dumpFile.close()
+
+			dumpFile = open('minLoad.prop', 'w')
+			json.dump(staticLoad, dumpFile, sort_keys=True, indent=4, separators=(',', ': '))
+			dumpFile.close()
+
+
 
 		logReader.buildFigure(allCharts, allLabels[mode], deltaMode, self.chartTitleEntry.get_text(), mode=mode, patchLoad=patchLoad)
 
@@ -289,6 +399,23 @@ class handler:
 			dump = logReader.createPropDump(sample, index)
 
 	def doIntegrateDumpProp(self, button):
+
+
+		idleValues=[]
+		for row in self.fileList:
+			path = row['fullPath'][1:]
+			if '.patch' in path: continue
+			if '.prop' in path: continue
+
+			sample, index = logReader.readBinaryLog(path, shortLoad = 5.1)
+			medVal = logReader.getIdleThrust(sample, index)
+			idleValues.append(medVal)
+
+		idleOffset = 0
+		if idleValues:
+			idleOffset = -(sum(idleValues))/len(idleValues)
+		print "found idle offset:", idleOffset
+
 
 		thisProp = None
 		for row in self.fileList:
@@ -312,7 +439,7 @@ class handler:
 
 			sample, index = logReader.readBinaryLog(path)
 
-			thisProp = logReader.integratePropDump(sample, index, thisProp)
+			thisProp = logReader.integratePropDump(sample, index, thisProp, idleOffset)
 
 
 
@@ -325,10 +452,20 @@ class handler:
 		paths = data.get_uris()
 		for uri in paths:
 			path = urlparse.unquote(urlparse.urlparse(uri).path)
-			self.addRow(path)
+			if '.bbSession' in path:
+				self.loadSessionFile(path)
+			else:
+				self.addRow(path)
 
 		context.finish(True, False, time)
 
+	def loadSessionFile(self, path):
+		self.doClearAll(None)
+		sessionFile = open(path[1:], 'r')
+		sessionLoad = json.load(sessionFile)
+		sessionFile.close()
+		for item in reversed(sessionLoad):
+			self.addRow(item['path'], labelText=item['label'] )
 
 	def got_data_ref(self, wid, context, x, y, data, info, time):
 		paths = data.get_uris()
@@ -337,12 +474,14 @@ class handler:
 		self.refEntry.set_text( os.path.basename(self.refPath) )
 		context.finish(True, False, time)
 
-	def addRow(self, file):
+	def addRow(self, file, labelText=None):
 
 		thisRow = {}
 		thisRow['fullPath']=file
 		thisRow['baseName']=os.path.basename(file)
-		thisRow['label']=thisRow['baseName'].split('.')[0]
+		thisRow['label'] = labelText
+		if not thisRow['label']:
+			thisRow['label']=thisRow['baseName'].split('.')[0]
 		self.fileList = [thisRow]+self.fileList
 
 		self.grid.insert_row(0)
@@ -394,6 +533,8 @@ button.drag_dest_set(0, [], 0)
 entry.drag_dest_set(0, [], 0)
 handlerObj = handler(builder)
 builder.connect_signals(handlerObj)
+
+window.set_title('Parse - Blade Bench')
 
 window.show_all()
 

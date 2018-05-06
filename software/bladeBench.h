@@ -7,7 +7,8 @@
 #define MODE_HOLD		2	//hold steady speed
 #define MODE_TARE		3	//reset the scale
 #define MODE_TACH		4	//calibrate the tach
-#define MODE_LOG_TACH	5	//calibrate the tach
+#define MODE_LOG_TACH	5	//log tach value
+#define MODE_MARKER		6	//drop log marker
 
 #define ABORT_NONE		0	//do not abort
 #define ABORT_TESTEND	1	//normal test end
@@ -22,12 +23,10 @@
 #define SAMPLE_AMP			1<<4
 #define SAMPLE_THRUST		1<<5
 #define SAMPLE_T1			1<<6
-#define SAMPLE_T2			1<<7
-#define SAMPLE_T3			1<<8
-#define SAMPLE_T4			1<<9
-#define SAMPLE_TACH_INDEX	1<<10
-#define SAMPLE_CALIBRATE	1<<11
-#define SAMPLE_AUXCOMMAND	1<<12
+#define SAMPLE_TACH_INDEX	1<<7
+#define SAMPLE_CALIBRATE	1<<8
+#define SAMPLE_AUXCOMMAND	1<<9
+#define SAMPLE_MARKER		1<<10
 
 
 const unsigned int COMMANDBUFFER_SIZE = 100; //buffer for benchmark commands
@@ -70,12 +69,7 @@ struct rawSampleStruct {
 	unsigned long time = 0;
 	bool T1Present = false;
 	uint16_t T1 = 0;
-	bool T2Present = false;
-	uint16_t T2 = 0;
-	bool T3Present = false;
-	uint16_t T3 = 0;
-	bool T4Present = false;
-	uint16_t T4 = 0;
+	uint8_t tIndex=0;
 	bool thrustPresent = false;
 	long thrust = 0;
 	bool commandValuePresent = false;
@@ -91,6 +85,8 @@ struct rawSampleStruct {
 	bool ampsPresent = false;
 	uint16_t amps = 0;
 	volatile bool ready = false;
+	uint8_t markerID=0;
+
 };
 
 

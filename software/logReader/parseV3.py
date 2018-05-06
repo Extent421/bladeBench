@@ -1,6 +1,7 @@
 import gzip
 import pickle
 import os
+import math
 
 import numpy
 
@@ -357,7 +358,7 @@ def readBinaryLog(file, shortLoad=None):
 	if len(index['RPM']) > 1:
 		filters.lowpassIndexFilter(index, allSamples, 'RPM', order=2, cutoff=100)
 	if len(index['Thrust']) > 1:
-		filters.lowpassIndexFilter(index, allSamples, 'Thrust', order=2, cutoff=100)
+		filters.lowpassIndexFilter(index, allSamples, 'Thrust', order=2, cutoff=4)
 	if len(index['T4']) > 1:
 		filters.lowpassIndexFilter(index, allSamples, 'T4', order=1, cutoff=1)
 

@@ -1,6 +1,7 @@
 import gzip
 import pickle
 import os
+import math
 
 import numpy
 
@@ -16,20 +17,17 @@ SAMPLE_VOLT = 1<<3
 SAMPLE_AMP = 1<<4
 SAMPLE_THRUST = 1<<5
 SAMPLE_T1 = 1<<6
-SAMPLE_T2 = 1<<7
-SAMPLE_T3 = 1<<8
-SAMPLE_T4 = 1<<9
-SAMPLE_TACH_INDEX = 1<<10
-SAMPLE_CALIBRATE = 1<<11
-SAMPLE_AUXCOMMAND = 1<<12
-SAMPLE_MARKER = 1<<12
+SAMPLE_TACH_INDEX = 1<<7
+SAMPLE_CALIBRATE = 1<<8
+SAMPLE_AUXCOMMAND = 1<<9
+SAMPLE_MARKER = 1<<10
 
 
 def readBinaryLog(file, shortLoad=None):
 	import struct
-	print 'parsing log', file
+	print 'parsing log v4', file
 
-	allKeys = ['RPM', 'RPMRAW', 'RPMIndex', 'calibrate', 'Volt', 'Amp', 'Thrust','Motor Command', 'Time', 'T1', 'T2', 'T3', 'T4', 'autoCalibrate']
+	allKeys = ['RPM', 'RPMRAW', 'RPMIndex', 'calibrate', 'Volt', 'Amp', 'Thrust','Motor Command','Aux Command', 'Time', 'T1', 'T2', 'T3', 'T4', 'autoCalibrate', 'Marker']
 	allSamples = []
 	index = {}
 	for key in allKeys:
@@ -214,9 +212,10 @@ def readBinaryLog(file, shortLoad=None):
 				if not len(data): break
 				unpacked = struct.unpack('<B', data)[0]
 				markerIndex = unpacked
-
 				thisSample['Marker']=markerIndex
 				index['Marker'].append(len(allSamples))
+
+
 
 			allSamples.append(thisSample)
 
@@ -316,7 +315,7 @@ def readBinaryLog(file, shortLoad=None):
 
 	# reject obvious noise samples
 
-	filters.highValueIndexFilter(index, allSamples, 'RPM', cutoff=65000)
+	filters.highValueIndexFilter(index, allSamples, 'RPM', cutoff=80000)
 
 	print 'tach noise filter...'
 	#stdIndexFilter(index, allSamples, 'RPM', windowSize=3, distanceMult=10)
@@ -329,10 +328,10 @@ def readBinaryLog(file, shortLoad=None):
 	#lowpass filter
 	filters.lowpassIndexFilter(index, allSamples, 'Amp', order=1, cutoff=4)
 	filters.lowpassIndexFilter(index, allSamples, 'Volt', order=1, cutoff=4)
-	if len(index['RPM']) > 1:
-		filters.lowpassIndexFilter(index, allSamples, 'RPM', order=2, cutoff=100)
+	#if len(index['RPM']) > 1:
+	#	filters.lowpassIndexFilter(index, allSamples, 'RPM', order=2, cutoff=100)
 	if len(index['Thrust']) > 1:
-		filters.lowpassIndexFilter(index, allSamples, 'Thrust', order=2, cutoff=100)
+		filters.lowpassIndexFilter(index, allSamples, 'Thrust', order=2, cutoff=8)
 	if len(index['T4']) > 1:
 		filters.lowpassIndexFilter(index, allSamples, 'T4', order=1, cutoff=1)
 
@@ -341,6 +340,9 @@ def readBinaryLog(file, shortLoad=None):
 
 	for sampleIndex in index['RPM']:
 		allSamples[sampleIndex]['RPMF'] = allSamples[sampleIndex]['RPM']
+
+	index['RPMF']=index['RPM']
+
 
 	#auto TARE.
 
@@ -398,6 +400,7 @@ def readBinaryLog(file, shortLoad=None):
 		if key == 'RPMIndex' : continue
 		if key == 'RPMRAW' : continue
 		if key == 'calibrate' : continue
+		if key == 'Marker' : continue
 		if not len(index[key]) : continue
 		print 'interpolating', key
 

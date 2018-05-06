@@ -142,41 +142,7 @@
             <property name="can_focus">False</property>
             <property name="active_id">Test Thrust</property>
             <items>
-              <item id="Thrust Over RPM" translatable="yes">thrust</item>
-              <item id="Thrust Fitline" translatable="yes">thrust fit</item>
-              <item id="Test Thrust" translatable="yes">test thrust</item>
-              <item id="Test Thrust Residual" translatable="yes">test thrust residual</item>
-              <item id="Test Torque" translatable="yes">test torque</item>
-              <item id="Test Torque Residual" translatable="yes">test torque residual</item>
-              <item id="Test Watts" translatable="yes">test watts</item>
-              <item id="Thrust Over Throttle" translatable="yes">throttle thrust</item>
-              <item id="Load" translatable="yes">load</item>
-              <item id="Test RPM" translatable="yes">Test RPM</item>
-              <item id="RPM Over Throttle" translatable="yes">RPM Over Throttle</item>
-              <item id="Watts" translatable="yes">Watts</item>
-              <item id="MechPower" translatable="yes">MechPower</item>
-              <item id="MechEff" translatable="yes">MechEff</item>
-              <item id="Torque Over RPM" translatable="yes">Torque over RPM</item>
-              <item id="Inertia" translatable="yes">Inertia</item>
-              <item id="InertiaSingle" translatable="yes">Inertia Single</item>
-              <item id="testRpmRAW" translatable="yes">test rpm RAW</item>
-              <item id="Efficiency Over RPM" translatable="yes">Efficiency over RPM</item>
-              <item id="Efficiency Over Throttle" translatable="yes">Efficiency over Throttle</item>
-              <item id="Test V" translatable="yes">V</item>
-              <item id="VRaw" translatable="yes">V raw</item>
-              <item id="Test A" translatable="yes">A</item>
-              <item id="ARaw" translatable="yes">A raw</item>
-              <item id="T1Raw" translatable="yes">T1 raw</item>
-              <item id="T2Raw" translatable="yes">T2 raw</item>
-              <item id="T4Raw" translatable="yes">T4 raw</item>
-              <item id="Thrust Over T1" translatable="yes">Thrust over T1</item>
-              <item id="Thrust Over V" translatable="yes">Thrust over V</item>
-              <item id="commandRaw" translatable="yes">command Raw</item>
-              <item id="auxRaw" translatable="yes">aux Raw</item>
-              <item id="overview" translatable="yes">overview</item>
-              <item id="stats" translatable="yes">stats</item>
-              <item id="calibrationStats" translatable="yes">calibrationStats</item>
-              <item id="rename" translatable="yes">rename</item>
+              <item id="blank" translatable="yes">blank</item>
             </items>
           </object>
           <packing>
@@ -199,8 +165,8 @@
           </packing>
         </child>
         <child>
-          <object class="GtkCheckButton" id="deltaCheck">
-            <property name="label" translatable="yes">delta</property>
+          <object class="GtkCheckButton" id="freeCheck">
+            <property name="label" translatable="yes">freelook</property>
             <property name="width_request">56</property>
             <property name="height_request">25</property>
             <property name="visible">True</property>
@@ -240,14 +206,14 @@
           </packing>
         </child>
         <child>
-          <object class="GtkButton" id="bttnDumpProp">
-            <property name="label" translatable="yes">Dump Prop</property>
+          <object class="GtkButton" id="bttnSaveSession">
+            <property name="label" translatable="yes">Save Session</property>
             <property name="width_request">100</property>
             <property name="height_request">20</property>
             <property name="visible">True</property>
             <property name="can_focus">True</property>
             <property name="receives_default">True</property>
-            <signal name="clicked" handler="doDumpProp" swapped="no"/>
+            <signal name="clicked" handler="doSaveSession" swapped="no"/>
           </object>
           <packing>
             <property name="x">22</property>

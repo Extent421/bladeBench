@@ -3,10 +3,14 @@ import copy
 import math
 import json
 
+import webbrowser
+import os
+
 from bokeh.plotting import figure, output_file, show, reset_output, ColumnDataSource
 from bokeh.models import HoverTool, Range1d, LinearAxis, LinearColorMapper, ColorBar, BasicTicker, PrintfTickFormatter, CustomJS, TapTool, Slider, widgets
 from bokeh.layouts import row, widgetbox
 from bokeh import events
+import bokeh
 
 import numpy.polynomial.polynomial as poly
 import numpy
@@ -15,13 +19,15 @@ import numpy
 from . import parseV3
 from . import parseV4
 from . import util
+from . import filters
+from . import chartBuilder
 
 dynoStartTime = 9.25
 dynoEndTime = 12.8
+dynoEndTime = 12.85
 dynoPreLoad = 0
 
 MIN_SAMPLE_TIME = 100 #minimum time between sample readings in micros
-
 
 
 class smoother():
@@ -73,6 +79,60 @@ class KalmanFilter(object):
 
     def get(self):
         return self.posteri_estimate
+
+class bladeBenchLog():
+	filePath = None
+	headerValues = {}
+
+	def __init__(self, filePath ):
+		self.filePath = filePath
+		self.readHeader()
+
+	def readHeader(self):
+		with open(self.filePath, 'rb') as f:
+
+			for line in iter(f.readline, ''):
+				if 'adcMaxValue:' in line:
+					self.headerValues['adcMax'] = float(line.split(':')[-1])
+				if 'vref:' in line:
+					self.headerValues['vref'] = float(line.split(':')[-1])
+				if 'thermBValue:' in line:
+					self.headerValues['thermBValue'] = float(line.split(':')[-1])
+				if 'pulse per rev:' in line:
+					self.headerValues['pulse per rev'] = int(line.split(':')[-1])
+				if 'loadcell calibration value:' in line:
+					self.headerValues['loadcell calibration value'] = float(line.split(':')[-1])
+
+				if 'vrange:' in line:
+					if '6s' in line.split(':')[-1]:
+						self.headerValues['vrange']='6s'
+					else:
+						self.headerValues['vrange']='3s'
+
+				if 'vCalibrate:' in line:
+					self.headerValues['vCalibrate'] = float(line.split(':')[-1])
+				if 'vOffset:' in line:
+					self.headerValues['vOffset'] = float(line.split(':')[-1])
+				if 'aCalibrate:' in line:
+					self.headerValues['aCalibrate'] = float(line.split(':')[-1])
+				if 'aOffset:' in line:
+					self.headerValues['aOffset'] = float(line.split(':')[-1])
+
+				if 'motorPully:' in line:
+					self.headerValues['motorPully'] = float(line.split(':')[-1])
+				if 'drivePully:' in line:
+					self.headerValues['drivePully'] = float(line.split(':')[-1])
+
+				if 'loaded program:' in line:
+					self.headerValues['loaded program'] = line.split(':')[-1].strip()
+
+				if line == 'Data Start:\n':
+					self.headerValues['data start'] = f.tell()
+					break
+
+	def getProgramName(self):
+		if 'loaded program' in self.headerValues.keys():
+			return self.headerValues['loaded program']
 
 
 def readLog(file):
@@ -378,22 +438,61 @@ def getTorqueOverRPM(sample, index, idleOffset=0):
 	command = []
 	inWatts = []
 
+	global dynoStartTime, dynoEndTime
+	dynoStartTime = 3
+	dynoEndTime = 99
 	thisProgramName = sample[0]['programName']
+	
+	if 'Marker' in index.keys():
+		for sampleIndex in index['Marker']:
+			if sample[sampleIndex]['Marker'] == 1:
+				dynoStartTime = util.getFloatTime(sample[sampleIndex]['Time'])
+			if sample[sampleIndex]['Marker'] == 2:
+				dynoEndTime = util.getFloatTime(sample[sampleIndex]['Time'])
 
-	for sampleIndex in index['Volt']:
+	minThrust = None
+	minThrustIndex = None
+	minRpm = None
+	minRpmIndex =None
+
+	for sampleIndex in index['Time']:
 		time = sample[sampleIndex]['Time']
 		roundedTime = util.getFloatTime(time) 
 
 		if roundedTime<dynoStartTime-dynoPreLoad: continue
-		if roundedTime>dynoEndTime: continue
+		if roundedTime>dynoEndTime: break
+
+		if not minThrust:
+			minThrust = sample[sampleIndex]['ThrustF']
+			minThrustIndex = sampleIndex
+
+		if not minRpm:
+			minRpm = sample[sampleIndex]['RPM']
+			minRpmIndex = sampleIndex
+
+		if sample[sampleIndex]['ThrustF'] < minThrust:
+			minThrust = sample[sampleIndex]['ThrustF']
+			minThrustIndex = sampleIndex
+
+		if sample[sampleIndex]['RPMF'] < minRpm:
+			minRpm = sample[sampleIndex]['RPMF']
+			minRpmIndex = sampleIndex
+
+
+	print 'range indexes', minThrustIndex, minRpmIndex
+	for sampleIndex in index['RPM']:
+		time = sample[sampleIndex]['Time']
+		roundedTime = util.getFloatTime(time) 
+
+		if sampleIndex>minRpmIndex: break
+		if sampleIndex<minThrustIndex: continue
 
 		volt = sample[sampleIndex]['VoltF']
 		amp = sample[sampleIndex]['AmpF']
 
-		if sampleIndex not in index['Thrust']: continue
+		#if sampleIndex not in index['Thrust']: continue
 
 		thrust = sample[sampleIndex]['ThrustF']+idleOffset
-		if roundedTime<dynoStartTime: continue
 
 		rpm = sample[sampleIndex]['RPMF']
 
@@ -410,9 +509,18 @@ def getTorqueOverRPM(sample, index, idleOffset=0):
 		command.append(sample[sampleIndex]['Motor Command'] )
 
 	accX = []
+	accY = []
 	accZ = []
 	accInWatts = []
 
+	'''
+	extraData = {}
+	extraData['z'] = z
+	extraData['inWatts'] = inWatts
+	extraData['command'] = command
+
+	return x, y, extraData, thisProgramName
+	'''
 
 	mergedX = []
 	mergedY = []
@@ -420,29 +528,53 @@ def getTorqueOverRPM(sample, index, idleOffset=0):
 	mergedCommand = []
 	mergedInWatts = []
 	lastValue = y[0]
+	lastIndex = 0
+	maxDist = 1000
+	#maxDist = 250
 
+	#preload the merged result with the actual highest RPM sample
+	mergedCommand.append(command[0])
+	mergedX.append(x[0])
+	mergedY.append(y[0])
+	mergedZ.append(z[0])
+	mergedInWatts.append(inWatts[0])
+
+
+	#reduce point count based on segment distance
 	for index in range(0,len(x)):
-		if y[index] != lastValue:
-			mergedY.append(lastValue)
+		xDist = x[index] - x[lastIndex]
+		yDist = ( y[index] - y[lastIndex] )*1000000
+		thisDist = abs( math.sqrt( pow(xDist,2) + pow(yDist,2) ) )
+
+		if thisDist > maxDist:
 			mergedCommand.append(command[index])
 			mergedX.append(numpy.mean(accX))
+			mergedY.append(numpy.mean(accY))
 			mergedZ.append(numpy.mean(accZ))
 			mergedInWatts.append(numpy.mean(accInWatts))
 			accX = []
+			accY = []
 			accZ = []
 			accInWatts = []
-
-			lastValue = y[index]
+			lastIndex = index
 
 		accX.append(x[index])
+		accY.append(y[index])
 		accZ.append(z[index])
 		accInWatts.append(inWatts[index])
 
 
-		extraData = {}
-		extraData['z'] = mergedZ
-		extraData['inWatts'] = mergedInWatts
-		extraData['command'] = mergedCommand
+	mergedCommand.append(command[index])
+	mergedX.append(numpy.mean(accX))
+	mergedY.append(numpy.mean(accY))
+	mergedZ.append(numpy.mean(accZ))
+	mergedInWatts.append(numpy.mean(accInWatts))
+
+	extraData = {}
+	extraData['z'] = mergedZ
+	extraData['inWatts'] = mergedInWatts
+	extraData['command'] = mergedCommand
+
 
 	return mergedX, mergedY, extraData, thisProgramName
 
@@ -516,21 +648,12 @@ def getTestThrust(sample, index):
 	# thrust / RPM
 	x = []
 	y = []
-	#smooth = smoother(avgTaps=5, medTaps=100, preAvgTaps=20)
-	#smooth = smoother(avgTaps=1, medTaps=1, preAvgTaps=1)
-	#smooth = KalmanFilter(.01, 100)
-
-
-
 
 	for sampleIndex in index['Thrust']:
 		time = sample[sampleIndex]['Time']
 		thrust = sample[sampleIndex]['ThrustF']
-		#smooth.add( thrust )
 		y.append( thrust )
-		#smoothedValue =  round(smooth.get(), 4 )
 		x.append( util.getFloatTime(time) )
-		#y.append(smoothedValue)
 
 	return x, y
 
@@ -548,8 +671,6 @@ def getIdleThrust(sample, index):
 		return numpy.median(samples)
 
 	return None
-
-
 
 def getTestThrustResidual(sample, index):
 	# thrust / RPM
@@ -617,6 +738,164 @@ def getTestRpm(sample, index, deltaMode=False):
 			lastValue = thisValue
 		else:
 			y.append(rpm)
+	return x, y
+
+def getInertia(sample, index, torqueLoad, propLoad):
+	x = []
+	y = []
+
+	thisStaticTorque = 0
+
+	inertiaStart = 0
+	inertiaEnd = 99
+
+	
+	if 'Marker' in index.keys():
+		for sampleIndex in index['Marker']:
+			if sample[sampleIndex]['Marker'] == 1:
+				inertiaStart = util.getFloatTime(sample[sampleIndex]['Time']) + 0.005
+				inertiaEnd = inertiaStart + 0.020
+				inertiaEnd = inertiaStart + 0.045
+				inertiaEnd = inertiaStart + 1
+
+
+	for i in xrange( 1,len(index['RPM']) ):
+		sampleIndex = index['RPM'][i]
+		thisTime = sample[sampleIndex]['Time']
+
+		roundedTime = util.getFloatTime(thisTime) 
+		if roundedTime<inertiaStart: continue
+		if roundedTime>inertiaEnd: break
+
+
+		lastTime = sample[sampleIndex-1]['Time']
+		thisRPM = sample[sampleIndex]['RPMF']
+		lastRPM = sample[sampleIndex-1]['RPMF']
+		thisCommand = sample[sampleIndex]['Motor Command']
+		throttle = int(round( (thisCommand/2000.0) * 100))
+
+		if throttle not in torqueLoad.keys():
+			continue
+		found = False
+		for j in xrange( len( torqueLoad[throttle] ) ):
+			if torqueLoad[throttle][j]['rpm']> thisRPM:
+				found=True
+				break
+
+		if not found:
+			print 'no torque found', thisRPM, 'on', throttle
+			continue
+
+		if propLoad:
+			found = False
+			for k in xrange( len( propLoad ) ):
+				if propLoad[k]['rpm']> thisRPM:
+					found=True
+					break
+		
+			if not found:
+				print 'no prop torque found', thisRPM
+				continue
+
+			propRPMA = propLoad[k]['rpm']
+			propRPMB = propLoad[k-1]['rpm']
+			propTorqueA = propLoad[k]['torque']
+			propTorqueB = propLoad[k-1]['torque']
+			interpDist = (thisRPM-propRPMA)/(propRPMB-propRPMA)
+			thisStaticTorque = propTorqueA + (propTorqueB - propTorqueA)*interpDist
+
+
+		RPMA = torqueLoad[throttle][j]['rpm']
+		RPMB = torqueLoad[throttle][j-1]['rpm']
+		torqueA = torqueLoad[throttle][j]['torque']
+		torqueB = torqueLoad[throttle][j-1]['torque']
+
+
+		interpDist = (thisRPM-RPMB)/(RPMA-RPMB)
+		thisTotalTorque = torqueB + (torqueA - torqueB)*interpDist
+
+		accelTorque = thisTotalTorque - thisStaticTorque
+
+		timeDelta = util.getFloatTime( thisTime - lastTime )
+		RPMDelta = thisRPM - lastRPM
+
+		accel = RPMDelta/timeDelta
+
+		accelRadian = (math.pi/30) * accel
+		torqueNm = accelTorque/100
+		inertia = torqueNm/accelRadian # in kg m^2
+		inertiaG = inertia*pow(10, 7) # in g cm^2
+		#T=I*A
+		#T/A = I
+		if inertiaG > 200: continue
+		if inertiaG < 0: continue
+
+		x.append( util.getFloatTime(thisTime) )
+		y.append(inertiaG)
+
+	if len(y)>6:
+		print 'Y length', len(y)
+		y = filters.butterFilter(y, order = 1, cutoff = 0.5 ) 
+	
+	return x, y
+
+def getInertiaSingle(sample, index):
+	x = []
+	y = []
+
+	thisStaticTorque = 0
+
+	inertiaStart = 0
+	inertiaEnd = 99
+
+	
+	if 'Marker' in index.keys():
+		for sampleIndex in index['Marker']:
+			if sample[sampleIndex]['Marker'] == 1:
+				inertiaStart = util.getFloatTime(sample[sampleIndex]['Time']) + 0.005
+				inertiaEnd = inertiaStart + 0.020
+				inertiaEnd = inertiaStart + 0.045
+				inertiaEnd = inertiaStart + 1
+
+	for i in xrange( 1,len(index['RPM']) ):
+		sampleIndex = index['RPM'][i]
+		thisTime = sample[sampleIndex]['Time']
+
+		roundedTime = util.getFloatTime(thisTime) 
+		if roundedTime<inertiaStart: continue
+		if roundedTime>inertiaEnd: break
+
+
+		lastTime = sample[sampleIndex-1]['Time']
+		thisRPM = sample[sampleIndex]['RPMF']
+		lastRPM = sample[sampleIndex-1]['RPMF']
+		thisCommand = sample[sampleIndex]['Motor Command']
+		throttle = int(round( (thisCommand/2000.0) * 100))
+
+
+		accelTorque = sample[sampleIndex]['ThrustF']
+
+		timeDelta = util.getFloatTime( thisTime - lastTime )
+		RPMDelta = thisRPM - lastRPM
+
+		accel = RPMDelta/timeDelta
+
+		accelRadian = (math.pi/30) * accel
+		torqueNm = accelTorque
+		inertia = torqueNm/accelRadian # in kg m^2
+		inertiaG = inertia*pow(10, 7) # in g cm^2
+		#T=I*A
+		#T/A = I
+		if inertiaG > 200: continue
+		if inertiaG < 0: continue
+
+		x.append( util.getFloatTime(thisTime) )
+		y.append(inertiaG)
+
+	if len(y)>6:
+		print 'Y length', len(y)
+		y = filters.butterFilter(y, order = 1, cutoff = 0.5 ) 
+	
 	return x, y
 
 def getTestRpmError(sample, index, deltaMode=False):
@@ -828,7 +1107,7 @@ def createPropDump(sample, index):
 
 	return dump
 
-def integratePropDump(sample, index, dump):
+def integratePropDump(sample, index, dump,  idleOffset=0):
 	x = []
 	y = []
 	z = []
@@ -840,36 +1119,83 @@ def integratePropDump(sample, index, dump):
 	throttleValue = float(nameSplit[0])
 	thisDumpEntry = None
 
-	print 'starting with dump', dump
+	print 'starting with dump, searching for',(throttleValue/100)*2000
 	for item in dump:
-		print 'item', item
 		if item['command']==(throttleValue/100)*2000:
 			print 'found dump entry', item
 			thisDumpEntry = item
 			break
 
+	if not thisDumpEntry: return dump
+
 	targetRPM = thisDumpEntry['rpm']
-	tolerance = 100
+	tolerance = 200
+
 
 	torqueAcc = []
+	minThrust = None
+	minThrustIndex = None
+	minRpm = None
+	minRpmIndex =None
+
+	global dynoStartTime, dynoEndTime
+
+	if 'Marker' in index.keys():
+		for sampleIndex in index['Marker']:
+			if sample[sampleIndex]['Marker'] == 1:
+				dynoStartTime = util.getFloatTime(sample[sampleIndex]['Time'])+.5
+			if sample[sampleIndex]['Marker'] == 2:
+				dynoEndTime = util.getFloatTime(sample[sampleIndex]['Time'])-.05
+
+	print 'start/end', dynoStartTime, dynoEndTime
+
 	for sampleIndex in index['RPM']:
 		time = sample[sampleIndex]['Time']
 		roundedTime = util.getFloatTime(time) 
 
 		if roundedTime<dynoStartTime-dynoPreLoad: continue
-		if roundedTime>dynoEndTime: continue
+		if roundedTime>dynoEndTime: break
 
-		if sampleIndex not in index['Thrust']: continue
+		if not minThrust:
+			minThrust = sample[sampleIndex]['ThrustF']
+			minThrustIndex = sampleIndex
 
-		thisTorque = sample[sampleIndex]['ThrustF']*100 # convert Nm to Ncm
-		if roundedTime<dynoStartTime: continue
+		if not minRpm:
+			minRpm = sample[sampleIndex]['RPM']
+			minRpmIndex = sampleIndex
 
+		if sample[sampleIndex]['ThrustF'] < minThrust:
+			minThrust = sample[sampleIndex]['ThrustF']
+			minThrustIndex = sampleIndex
+
+		if sample[sampleIndex]['RPMF'] < minRpm:
+			minRpm = sample[sampleIndex]['RPMF']
+			minRpmIndex = sampleIndex
+
+	print minThrust, minThrustIndex, util.getFloatTime(sample[minThrustIndex]['Time']), minRpm, minRpmIndex,  util.getFloatTime(sample[minRpmIndex]['Time'])
+
+
+	foundExact = None
+
+	for sampleIndex in index['RPM']:
+		time = sample[sampleIndex]['Time']
+		roundedTime = util.getFloatTime(time) 
+
+		if sampleIndex>minRpmIndex: break
+		if sampleIndex<minThrustIndex: continue
+
+
+		thisTorque = (sample[sampleIndex]['ThrustF']+idleOffset)*100 # convert Nm to Ncm
 		rpm = sample[sampleIndex]['RPMF']
 
 		if not rpm: continue
 
-		tolerance = targetRPM * 0.0025
+		if (not foundExact) and (rpm < targetRPM):
+			foundExact = thisTorque
+			print 'found point', thisTorque, sample[sampleIndex]['Thrust']*100, sample[sampleIndex]['RPMF'], sample[sampleIndex]['RPM']
+		tolerance = targetRPM * 0.005
 		if ((rpm > targetRPM-tolerance) and (rpm < targetRPM+tolerance)):
+			print 'found range', thisTorque,sample[sampleIndex]['RPM']
 			torqueAcc.append( thisTorque)
 		
 	print 'averaging', len(torqueAcc)
@@ -877,7 +1203,7 @@ def integratePropDump(sample, index, dump):
 	if not torqueAcc: return dump
 
 	averageTorque = sum(torqueAcc)/len(torqueAcc)
-	thisDumpEntry['torque']=averageTorque
+	thisDumpEntry['torque']=foundExact
 	thisDumpEntry['torqueCnt']=len(torqueAcc)
 
 	dumpFile = open('lastIntegrate.prop', 'w')
@@ -894,8 +1220,17 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 	xLabel = labelList['x']
 	yLabel = labelList['y']
 	yScale = labelList['yScale']
+
+
 	if deltaMode:
 		yScale = labelList['yScaleDelta']
+
+
+	figureArgs ={}
+	figureArgs['y_range']=[0, yScale]
+	#figureArgs['x_range']=[0, 40000]
+
+
 	
 	deltaString = ''
 	if deltaMode:
@@ -926,170 +1261,65 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 
 	hover = HoverTool(
 		tooltips = tooltipList,
+		names=['propLine', 'scatterPlot']
 		#mode='vline',
 	)
 
 
+	mapperColors = ["#d7191c", "#CF353D", "#C7505E", "#CF7E8C", "#CDA0B1", "#cac2d6", "#9EB5DA", "#72A8DE", "#459AE2", "#198de6"]
+	mapper = LinearColorMapper(palette=mapperColors, low=.0, high=1)
+	mapperLegend = LinearColorMapper(palette=mapperColors, low=.0, high=100)
+
+
+
+	# load up the patch data, building the polygons for each efficiency range
+	patches = {}
+	patches['data'] = {}
+	outsidePoints = []
+
+	if not patchLoad:
+		print 'creating default patch'
+		patchLoad = {1: [[0, 0], [0, 0.001]], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [], 8: [], 9: [], 10: []}
+	
+		patches, outsidePoints = chartBuilder.loadPatchDump(patchLoad)
+	else:
+		print 'using passed patch'
+		patches, outsidePoints = chartBuilder.loadPatchDump(patchLoad)
+
+		#if loading a patch file over ride the display range of the chart to fit
+		figureArgs['y_range']=[0, patches['ymax']*1.1]
+		figureArgs['x_range']=[0, patches['xmax']*1.15]
+
+	allScatter = []
+
+	print 'args', figureArgs
 
 	p = figure(
 		width=1520, plot_height=880,
 		tools=[hover,'pan','box_zoom','wheel_zoom', 'reset','crosshair', 'tap'],#"resize,pan,wheel_zoom,box_zoom,reset,box_select,lasso_select,hover",
 		active_scroll='wheel_zoom',
-		y_range=[0, yScale],
 		#y_range=None,
 		x_axis_label=xLabel,# y_axis_label=yLabel,
 		output_backend="webgl",
-		title=outputTitle
+		title=outputTitle,
+		**figureArgs
+
 	)
-	
-
-	#defaultRange = 'default_range'
-	#p.extra_y_ranges.update( {defaultRange: Range1d(start=0, end=yScale)} )
-	#p.add_layout(LinearAxis(y_range_name=defaultRange,  axis_label=yLabel), 'left')
 
 
-	#mapperColors = ["#75968f", "#a5bab7", "#c9d9d3", "#e2e2e2", "#dfccce", "#ddb7b1", "#cc7878", "#933b41", "#550b1d"]
-	#mapperColors = ["#d7191c", "#D3272D", "#CD3C46", "#C45E6F", "#BA8098", "#b0a3c2", "#929FC9", "#6C99D2", "#4694DB", "#3791DF", "#198de6"]
-	#mapperColors = ["#d7191c", "#CF353D", "#C7505E", "#CF7E8C", "#CDA0B1", "#cac2d6", "#9EB5DA", "#72A8DE", "#459AE2", "#198de6"]
-	mapperColors = ["#d7191c", "#CF353D", "#C7505E", "#CF7E8C", "#CDA0B1", "#cac2d6", "#9EB5DA", "#72A8DE", "#459AE2", "#198de6"]
-	#mapperColors = ["#d7191c",  "#ff0000",  "#000000",  "#00ff00", "#198de6"]
-	mapper = LinearColorMapper(palette=mapperColors, low=.0, high=1)
-	mapperLegend = LinearColorMapper(palette=mapperColors, low=.0, high=100)
+	if (outputTitle == 'Torque Over RPM') or (patchLoad):
+		color_bar = ColorBar(color_mapper=mapperLegend, major_label_text_font_size="8pt",
+                     ticker=BasicTicker(desired_num_ticks=len(colors)),
+                     formatter=PrintfTickFormatter(format="%d%%"),
+                     label_standoff=6, border_line_color=None, 
+                     height=500, location=(-80, 0))
+		p.add_layout(color_bar, 'right')
 
-	if outputTitle == 'Torque Over RPM':
-		allRanges = []
-		for item in dataList:
-			if '_' not in item['programName']: continue
-			throttleValue = int(item['programName'].split('_')[0])
-			smooth = smoother(avgTaps=3, medTaps=1)
-			smoothT = smoother(avgTaps=1, medTaps=3)
-			newZ = []
-			newY = []
+		if patches:
+			chartBuilder.addPatchToChart(patches, outsidePoints, mapperColors, p)
 
 
-			for value in item['extraData']['z']:
-				smooth.add(value)
-				newZ.append( smooth.get() )
-			count = 0
-			for value in item['y']:
-				smoothT.add(value)
-				#if value < 0: print 'under',  smoothT.get(), smoothT.medAcc, smoothT.avgAcc, count
-				count = count +1
-				newY.append( smoothT.get() )
-			#item['z']=newZ
-
-			range = {}
-			topValue = newZ[-1]
-			band = int(topValue*10)
-			range[band]={}
-			range['throttleValue']=throttleValue
-
-			range[band]['start']=[item['x'][-1],newY[-1]]
-			#for index in xrange(band, -1, -1):
-			for index in xrange(0,band, 1):
-				range[index]={}
-				range[index]['start']=[item['x'][-1],newY[-1]]
-				range[index]['end']=[item['x'][-1],newY[-1]]
-
-			for index in xrange(len(item['extraData']['z'] )-1, -1, -1): # count top down
-			#for index in xrange(0, len(item['z'] ), 1): # count bottom up
-				thisValue = item['extraData']['z'][index]
-				if thisValue > 1: continue
-				if int(thisValue*10) > band:
-					range[band]['end']=[item['x'][index],newY[index]]
-					band = int(thisValue*10)
-					range[band]={}
-					range[band]['start']=[item['x'][index],newY[index]]
-			range[band]['end']=[item['x'][0],newY[0]]
-
-			for index in xrange(band+1, 11 ):
-				range[index]={}
-				range[index]['start']=[item['x'][0],newY[0]]
-				range[index]['end']=[item['x'][0],newY[0]]
-			allRanges.append(range)
-			#item['range'] = range
-
-		allMin = 10
-		for range in allRanges:
-			allMin = min(min(range.keys()), allMin)
-
-		shapeCoords = {}
-		for shapeRange in xrange(0,11):
-			for range in allRanges:
-				thisMin = min(range.keys())
-				thisMax = max(range.keys())
-				if shapeRange not in range.keys():
-					continue
-					range[shapeRange] = {}
-					if shapeRange<thisMin:
-						range[shapeRange]['start'] = range[thisMin]['start']
-						range[shapeRange]['end'] = range[thisMin]['start']
-					else:
-						range[shapeRange]['start'] = range[thisMax]['end']
-						range[shapeRange]['end'] = range[thisMax]['end']
-				if shapeRange not in shapeCoords.keys():
-					shapeCoords[shapeRange] = []
-				shapeCoords[shapeRange].append( [range[shapeRange]['start'], range[shapeRange]['end'], range['throttleValue']] )
-
-		patches = {}
-		patchDump = {}
-
-		for index in shapeCoords:
-			shapeCoords[index].sort(key=lambda x: x[2]  )
-
-		for shapeRange in shapeCoords.keys():
-			patches[shapeRange] = {}
-			patchDump[shapeRange] = []
-			patches[shapeRange]['x']=[]
-			patches[shapeRange]['y']=[]
-
-			for index in xrange(0, len(shapeCoords[shapeRange])):
-				x = int(shapeCoords[shapeRange][index][0][0])
-				y = round(shapeCoords[shapeRange][index][0][1],4)
-				patches[shapeRange]['x'].append( x )
-				patches[shapeRange]['y'].append( y )
-				patchDump[shapeRange].append( [x,y] )
-
-			for index in xrange(len(shapeCoords[shapeRange])-1, -1, -1):
-				x = int(shapeCoords[shapeRange][index][1][0])
-				y = round(shapeCoords[shapeRange][index][1][1],4)
-				patches[shapeRange]['x'].append( x )
-				patches[shapeRange]['y'].append( y )
-				patchDump[shapeRange].append( [x,y] )
-
-		patchFile = open('last.patch', 'w')
-		json.dump(patchDump, patchFile, sort_keys=True, indent=4, separators=(',', ': '))
-		patchFile.close()
-
-	if patchLoad:
-		patches = {}
-		#for shapeRange in sorted(patchLoad.keys()):
-		for shapeRange in xrange(9,0,-1):
-			print 'getting shapeRange', shapeRange
-			patches[shapeRange] = {}
-			patches[shapeRange]['x']=[]
-			patches[shapeRange]['y']=[]
-			if not patchLoad[shapeRange]: continue
-
-			for index in xrange(0, len(patchLoad[shapeRange])):
-				print 'index', shapeRange, index
-				patches[shapeRange]['x'].append( patchLoad[shapeRange][index][0] )
-				patches[shapeRange]['y'].append( patchLoad[shapeRange][index][1] )
-
-			tempRange = patchLoad[shapeRange+1]
-			if patchLoad[shapeRange][0] in tempRange:
-				tempRange = tempRange[ tempRange.index(patchLoad[shapeRange][0]): ]
-			if patchLoad[shapeRange][-1] in tempRange:
-				tempRange = tempRange[ : tempRange.index(patchLoad[shapeRange][-1])]
-
-			for index in xrange(len(tempRange)-1, -1, -1):
-
-				print 'index',shapeRange+1, index
-
-				patches[shapeRange]['x'].append( tempRange[index][0] )
-				patches[shapeRange]['y'].append( tempRange[index][1] )
-
-	allScatter = []
+			chartBuilder.findIntersections(dataList, outsidePoints, p)
 
 	for item in dataList[::-1]:
 		if not colors:
@@ -1121,9 +1351,8 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 
 
 		source = ColumnDataSource( data=data)
-
 		if item['mode']=='line':
-			p.line('x', 'y', source=source, legend=item['label'], color=colors.pop(), line_width=3, *rangeArgs)
+			p.line('x', 'y', source=source, name='propLine', legend=item['label'], color=colors.pop(), line_width=3, *rangeArgs)
 
 		else:
 			scatterSize = 8
@@ -1132,26 +1361,15 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 				thisColor = {'field': 'z', 'transform': mapper}
 			else:
 				thisColor = colors.pop()
-			thisScatter = p.scatter('x', 'y', source=source, legend=item['label'], color=thisColor, size=scatterSize, *rangeArgs)
+			thisScatter = p.scatter('x', 'y', source=source, name='scatterPlot', legend=item['label'], color=thisColor, size=scatterSize, *rangeArgs)
 			allScatter.append(thisScatter)
 
 	p.legend.location = "top_left"
 	p.legend.click_policy="hide"
 
-	if (outputTitle == 'Torque Over RPM') or (patchLoad):
-		color_bar = ColorBar(color_mapper=mapperLegend, major_label_text_font_size="8pt",
-                     ticker=BasicTicker(desired_num_ticks=len(colors)),
-                     formatter=PrintfTickFormatter(format="%d%%"),
-                     label_standoff=6, border_line_color=None, 
-                     height=500, location=(-80, 0))
-		p.add_layout(color_bar, 'right')
 
-		for index in patches:
-			if index>len(mapperColors)-1:
-				thisColor = mapperColors[-1]
-			else:
-				thisColor = mapperColors[index]
-			p.patch( patches[index]['x'], patches[index]['y'], alpha=0.5, line_width=2, fill_color=thisColor)
+
+
 
 	callback = CustomJS(code="""
 	// the event that triggered the callback is cb_obj:
@@ -1172,8 +1390,10 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 	var x = d1['x'][srcIndex];
 	var y = d1['y'][srcIndex];
 	console.log('TapTool event occured at x-position: ' + x + ', '+ y);
-	coords.push( [ Math.round(x), +y.toFixed(2) ] );
-
+	console.log(parseInt(patchIndexInput.value));
+	var hitCoord = [ Math.round(x), y.toFixed(2) ] 
+	coords.push( hitCoord );
+	checkHit(hitCoord, parseInt(patchIndexInput.value) )
 	""")
 
 	#p.js_on_event(events.Tap, callback)
@@ -1239,6 +1459,9 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 	sizeInput = widgets.TextInput(value="", title="size", callback=sizeCallback)
 	sizeCallback.args['sizeInput']=sizeInput
 
+	patchIndexInput = widgets.TextInput(value="", title="patch index")
+	tapCallback.args['patchIndexInput']=patchIndexInput
+
 	xMinChangeCB = CustomJS(args=dict(source=source, xRange=p.x_range, yRange=p.y_range, 
 		xMinInput=xMinInput, xMaxInput=xMaxInput, yMinInput=yMinInput, yMaxInput=yMaxInput, bookmarkInput=bookmarkInput), code="""
 	xMinInput.value = xRange.start.toString();
@@ -1254,12 +1477,46 @@ def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patc
 	p.y_range.js_on_change('end', xMinChangeCB)
 
 
+
 	layout = row(
 		p,
-		widgetbox(xMinInput, xMaxInput, yMinInput, yMaxInput, bookmarkInput, sizeInput),
+		widgetbox(xMinInput, xMaxInput, yMinInput, yMaxInput, bookmarkInput, sizeInput, patchIndexInput),
+
 	)
+	from jinja2 import Template
+
+	template = Template('''<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>{{ title|e if title else "Bokeh Plot" }}</title>
+        {{ bokeh_css }}
+        {{ bokeh_js }}
+        <script type="text/javascript" src="patchLoader.js"></script>
+    </head>
+    <body>
+        {{ plot_div|indent(8) }}
+        {{ plot_script|indent(8) }}
+        <input type=button value="loadPatch" onclick="loadPatchFile()">
+		<input type='button' value='download patch' onclick='dumpPatch();'>
+		<input type='button' value='reset band' onclick='resetBand();'>
+		<input type='button' value='reset all' onclick='resetAll();'>
+
+        <form id="jsonFile" name="jsonFile" enctype="multipart/form-data" method="post">
+
+		  <fieldset>
+		    <h2>Json File</h2>
+		     <input type='file' id='fileinput'>
+		     <input type='button' id='btnLoad' value='Load' onclick='loadFile();'>
+		  </fieldset>
+		</form>
+    </body>
+</html>''')
 
 
-	show(layout)
+	bokeh.io.save(layout)
+	with open(outputFile, "w") as f: 
+		f.write(bokeh.embed.file_html(layout, bokeh.resources.INLINE, template=template) ) 
 	reset_output()
 
+	webbrowser.open('file://' + os.path.realpath(outputFile))
