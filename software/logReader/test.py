@@ -70,6 +70,7 @@ class handler:
 					'Thrust Over V':{'x':'Volts', 'y':'Thrust', 'yScale':300, 'mode':'scatter'},
 					'commandRaw':{'x':'Time', 'y':'Motor Command', 'yScale':2000, 'mode':'line'},
 					'auxRaw':{'x':'Time', 'y':'Aux Command', 'yScale':2000, 'mode':'line'},
+					'MQTBDump':{'x':'Time', 'y':'Aux Command', 'yScale':2000, 'mode':'line'},
 
 					}
 		mode = self.modeBox.get_active_id()
@@ -303,6 +304,9 @@ class handler:
 				x,y = logReader.getCommandRaw(sample, index, trace='Motor')
 			elif mode == 'auxRaw':
 				x,y = logReader.getCommandRaw(sample, index, trace='Aux')
+			elif mode == 'MQTBDump':
+				x,y = logReader.MQTBDump(sample, index)
+				return
 			elif mode == 'overview':
 				x,y = logReader.getCommandRaw(sample, index)
 				thisChart = {}
@@ -365,6 +369,7 @@ class handler:
 					thisPoint['rpm']=int( round( chart['x'][index] ) )
 					thisPoint['torque']=round( chart['y'][index], 4 )
 					thisPoint['inWatts']=round( chart['extraData']['inWatts'][index], 1 )
+					thisPoint['inVolts']=round( chart['extraData']['inVolts'][index], 1 )
 					thisPoint['eff']=round( chart['extraData']['z'][index], 2 )
 					torqueDict[throttle].append(thisPoint)
 

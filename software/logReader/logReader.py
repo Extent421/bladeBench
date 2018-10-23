@@ -437,6 +437,7 @@ def getTorqueOverRPM(sample, index, idleOffset=0):
 	z = []
 	command = []
 	inWatts = []
+	inVolts = []
 
 	global dynoStartTime, dynoEndTime
 	dynoStartTime = 3
@@ -506,12 +507,14 @@ def getTorqueOverRPM(sample, index, idleOffset=0):
 		x.append(rpm)
 		z.append(round(mechWatts/watts, 2) )
 		inWatts.append(round(watts, 1) )
+		inVolts.append(round(volt, 2) )
 		command.append(sample[sampleIndex]['Motor Command'] )
 
 	accX = []
 	accY = []
 	accZ = []
 	accInWatts = []
+	accInVolts = []
 
 	'''
 	extraData = {}
@@ -527,6 +530,7 @@ def getTorqueOverRPM(sample, index, idleOffset=0):
 	mergedZ = []
 	mergedCommand = []
 	mergedInWatts = []
+	mergedInVolts = []
 	lastValue = y[0]
 	lastIndex = 0
 	maxDist = 1000
@@ -538,6 +542,7 @@ def getTorqueOverRPM(sample, index, idleOffset=0):
 	mergedY.append(y[0])
 	mergedZ.append(z[0])
 	mergedInWatts.append(inWatts[0])
+	mergedInVolts.append(inVolts[0])
 
 
 	#reduce point count based on segment distance
@@ -552,16 +557,19 @@ def getTorqueOverRPM(sample, index, idleOffset=0):
 			mergedY.append(numpy.mean(accY))
 			mergedZ.append(numpy.mean(accZ))
 			mergedInWatts.append(numpy.mean(accInWatts))
+			mergedInVolts.append(numpy.mean(accInVolts))
 			accX = []
 			accY = []
 			accZ = []
 			accInWatts = []
+			accInVolts = []
 			lastIndex = index
 
 		accX.append(x[index])
 		accY.append(y[index])
 		accZ.append(z[index])
 		accInWatts.append(inWatts[index])
+		accInVolts.append(inVolts[index])
 
 
 	mergedCommand.append(command[index])
@@ -569,10 +577,12 @@ def getTorqueOverRPM(sample, index, idleOffset=0):
 	mergedY.append(numpy.mean(accY))
 	mergedZ.append(numpy.mean(accZ))
 	mergedInWatts.append(numpy.mean(accInWatts))
+	mergedInVolts.append(numpy.mean(accInVolts))
 
 	extraData = {}
 	extraData['z'] = mergedZ
 	extraData['inWatts'] = mergedInWatts
+	extraData['inVolts'] = mergedInVolts
 	extraData['command'] = mergedCommand
 
 
@@ -603,11 +613,30 @@ def getThrust(sample, index):
 	y = []
 	smooth = smoother(avgTaps=1, medTaps=1)
 	tSmooth = smoother(avgTaps=5, medTaps=29)
+
+	testStartTime = 3
+	testEndTime = 99
+	
+	if 'Marker' in index.keys():
+		for sampleIndex in index['Marker']:
+			if sample[sampleIndex]['Marker'] == 1:
+				testStartTime = util.getFloatTime(sample[sampleIndex]['Time'])
+			if sample[sampleIndex]['Marker'] == 2:
+				testEndTime = util.getFloatTime(sample[sampleIndex]['Time'])
+
 	for sampleIndex in index['Thrust']:
 		rpm = sample[sampleIndex]['RPMF']
 		time = sample[sampleIndex]['Time']
 		thrust = sample[sampleIndex]['ThrustF']
 		if not rpm: continue
+
+		roundedTime = util.getFloatTime(time) 
+
+		if roundedTime<testStartTime: continue
+		if roundedTime>testEndTime: break
+
+
+
 		smooth.add( rpm )
 		smoothedValue = round(smooth.get(), 3 )
 		tSmooth.add( thrust )
@@ -1213,6 +1242,55 @@ def integratePropDump(sample, index, dump,  idleOffset=0):
 	return dump
 
 
+def MQTBDump(sample, index):
+	x = []
+	y = []
+
+	erpmPoleCount = 7
+	sampleIncrement = 0.004
+	lastTime = 0.0
+
+	testStartTime = 0.0
+	testStartUsec = 0
+	if 'Marker' in index.keys():
+		for sampleIndex in index['Marker']:
+			if sample[sampleIndex]['Marker'] == 1:
+				testStartTime = util.getFloatTime(sample[sampleIndex]['Time'])
+				testStartUsec = sample[sampleIndex]['Time']
+
+
+	import csv
+	with open('mqtbDump.csv', 'wb') as csvFile:
+		dumpWriter = csv.writer(csvFile)
+		dumpWriter.writerow(['Time(uS)', 'Throttle(uS)', 'Thrust(g)', 'eSteps', 'eRPMs', 'Volts', 'Amps'])
+
+		for sampleIndex in index['Volt']:
+
+			time = sample[sampleIndex]['Time']
+			floatTime = util.getFloatTime(time)
+			if floatTime < testStartTime: 
+				lastTime = floatTime
+				continue
+
+			throttle = (sample[sampleIndex]['Motor Command']/2)+1000
+			thrust = round(sample[sampleIndex]['ThrustF'], 4)
+			eSteps = 0
+			rpm = round(sample[sampleIndex]['RPMSingle'])
+			volt = round(sample[sampleIndex]['VoltF'], 4)
+			amp = round(sample[sampleIndex]['AmpF'], 4)
+
+			floatTime = util.getFloatTime(time)
+			erpm = rpm * erpmPoleCount
+
+			if floatTime > (lastTime+sampleIncrement):
+				lastTime = lastTime+sampleIncrement
+				dumpWriter.writerow([time-testStartUsec, throttle, thrust, eSteps, erpm, volt, amp])
+
+
+
+
+
+	return x, y
 
 def buildFigure(dataList, labelList, deltaMode, chartTitle=None, mode=None, patchLoad=None):
 	colorsSource = ['steelblue', 'teal', 'indigo', 'greenyellow', 'gray', 'fuchsia', 'yellow', 'black', 'purple', 'orange', 'green', 'blue','red']

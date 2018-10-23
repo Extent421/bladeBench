@@ -177,6 +177,7 @@
               <item id="stats" translatable="yes">stats</item>
               <item id="calibrationStats" translatable="yes">calibrationStats</item>
               <item id="rename" translatable="yes">rename</item>
+              <item id="MQTBDump" translatable="yes">MQTBDump</item>
             </items>
           </object>
           <packing>

@@ -8,6 +8,7 @@ import time
 import json
 
 import math
+import numpy
 
 from collections import OrderedDict
 
@@ -37,6 +38,8 @@ class handler:
 		self.allLabels['Torque Over RPM']={'x':'RPM', 'y':'Torque Ncm', 'yScale':10, 'mode':'scatter'}
 		self.allLabels['Efficiency Over RPM']={'x':'RPM', 'y':'Efficiency', 'yScale':10, 'mode':'scatter'}
 		self.allLabels['Efficiency Over Thrust']={'x':'Thrust', 'y':'Efficiency', 'yScale':10, 'mode':'scatter'}
+		self.allLabels['KV']={'x':'RPM', 'y':'KV', 'yScale':8000, 'mode':'scatter'}
+		self.allLabels['Peak Torque']={'x':'RPM', 'y':'peak torque', 'yScale':10, 'mode':'scatter'}
 
 		self.clearModeBox()
 		self.buildModeBox()
@@ -70,6 +73,128 @@ class handler:
 
 				continue
 
+			if '.torque' in path:
+				torqueFile = open(path, 'r')
+				propBase = os.path.basename(path)
+				torqueTemp = json.load(torqueFile)
+				torqueFile.close()
+				print 'loaded torque'
+
+				torqueLoad = {}
+				for key in torqueTemp:
+					torqueLoad[int(key)] = torqueTemp[key]
+
+				if mode == 'KV':
+					allKV = []
+					for throttle in sorted(torqueLoad.keys()):
+						if len(torqueLoad[throttle]) < 2: continue
+						thisData = { }
+						thisData['x']= []
+						thisData['y']= []
+						for i in xrange( 1, len(torqueLoad[throttle]) ):
+
+							thisSample = torqueLoad[throttle][i]
+							lastSample = torqueLoad[throttle][i-1]
+
+							rpmDelta = thisSample['rpm'] - lastSample['rpm']
+							torqueDelta = thisSample['torque'] - lastSample['torque']
+
+							slope = torqueDelta/rpmDelta
+							#y = slope*x + offset
+							offset = thisSample['torque'] - (slope*thisSample['rpm'])
+							#y = slope*x + offset
+							#0 - offset = slope*x
+							intercept = (0 - offset)/slope
+							effectiveVolts = thisSample['inVolts']*(float(throttle)/100)
+							kv = intercept/effectiveVolts
+							#total ratio of Ncm per 10k rpm
+							torquePerRpm = -(torqueDelta*10000)/rpmDelta
+
+							thisData['x'].append( round(thisSample['rpm']) )
+							#thisData['y'].append( round(torquePerRpm, 5) )
+							thisData['y'].append( round(kv) )
+							allKV.append( round(kv) )
+							'''
+							if i == 20:
+								print 'throttle', throttle
+								print 'rpm', thisSample['rpm'] ,'-', lastSample['rpm'], '=', rpmDelta
+								print 'torqueDelta', thisSample['torque'] ,'-', lastSample['torque'], '=', torqueDelta, (torqueDelta*1000)
+								print 'effectiveVolts', thisSample['inVolts'] ,'*', (float(throttle)/100), '=', effectiveVolts
+								print 'slope', torqueDelta ,'/', rpmDelta, '=', slope
+								print 'offset', thisSample['torque'], '-', slope, '*', thisSample['rpm'], '=', offset
+							'''
+						thisChart = {}
+						thisChart['data']=thisData
+						thisChart['programName']='torque'
+						thisChart['label']=str(throttle)
+						thisChart['mode']=self.allLabels[mode]['mode']
+						thisChart['extraRange']=False
+						allCharts.append(thisChart)
+					print 'KV min, max, median, mean'
+					print round(numpy.min(allKV)),',', round(numpy.max(allKV)),',', round(numpy.median(allKV)),',', round(numpy.mean(allKV))
+					continue
+				elif mode == 'Peak Torque':
+					allKV = []
+					allPeakTorque = []
+					for throttle in sorted(torqueLoad.keys()):
+						if len(torqueLoad[throttle]) < 2: continue
+						thisData = { }
+						thisData['x']= []
+						thisData['y']= []
+						for i in xrange( 1, len(torqueLoad[throttle]) ):
+
+							thisSample = torqueLoad[throttle][i]
+							lastSample = torqueLoad[throttle][i-1]
+
+							rpmDelta = thisSample['rpm'] - lastSample['rpm']
+							torqueDelta = thisSample['torque'] - lastSample['torque']
+
+							slope = torqueDelta/rpmDelta
+
+							#skip bad samples
+							if slope == 0: continue
+							#y = slope*x + offset
+							offset = thisSample['torque'] - (slope*thisSample['rpm'])
+							#y = slope*x + offset
+							#y - offset = slope*x
+							intercept = (0 - offset)/slope
+							effectiveVolts = thisSample['inVolts']*(float(throttle)/100)
+							#effectiveStallTorque = offset/(float(throttle)/100)
+							effectiveStallTorque = offset/effectiveVolts
+							kv = intercept/effectiveVolts
+							#total ratio of Ncm per 10k rpm
+							torquePerRpm = -(torqueDelta*10000)/rpmDelta
+
+							thisData['x'].append( round(thisSample['rpm']) )
+							#thisData['y'].append( round(torquePerRpm, 5) )
+							#thisData['y'].append( round(kv) )
+							thisData['y'].append( round(effectiveStallTorque, 5) )
+							allKV.append( round(kv) )
+							allPeakTorque.append( round(effectiveStallTorque, 5) )
+							'''
+							if i == 20:
+								print 'throttle', throttle
+								print 'rpm', thisSample['rpm'] ,'-', lastSample['rpm'], '=', rpmDelta
+								print 'torqueDelta', thisSample['torque'] ,'-', lastSample['torque'], '=', torqueDelta, (torqueDelta*1000)
+								print 'effectiveVolts', thisSample['inVolts'] ,'*', (float(throttle)/100), '=', effectiveVolts
+								print 'slope', torqueDelta ,'/', rpmDelta, '=', slope
+								print 'offset', thisSample['torque'], '-', slope, '*', thisSample['rpm'], '=', offset
+							'''
+						thisChart = {}
+						thisChart['data']=thisData
+						thisChart['programName']='torque'
+						thisChart['label']=str(throttle)
+						thisChart['mode']=self.allLabels[mode]['mode']
+						thisChart['extraRange']=False
+						allCharts.append(thisChart)
+					print 'KV min, max, median, mean'
+					print round(numpy.min(allKV)),',', round(numpy.max(allKV)),',', round(numpy.median(allKV)),',', round(numpy.mean(allKV))
+					print 'Peak Torque min, max, median, mean'
+					print round(numpy.min(allPeakTorque), 4),',', round(numpy.max(allPeakTorque), 4),',', round(numpy.median(allPeakTorque), 4),',', round(numpy.mean(allPeakTorque), 4)
+					continue
+
+
+
 			if '.prop' in path:
 				propFile = open(path, 'r')
 				propBase = os.path.basename(path)
@@ -84,6 +209,7 @@ class handler:
 							if key not in propData:
 								propData[key]=[]
 							propData[key].append( item[key])
+
 
 				if mode == 'Torque Over RPM':
 					thisData = { }
@@ -144,7 +270,6 @@ class handler:
 					thisData['x']= [round(i, 1) for i in propData['thrust'] ]
 					thisData['y']= [round(i, 2) for i in eff]
 
-
 				thisChart = {}
 				thisChart['data']=thisData
 				thisChart['programName']='prop'
@@ -157,6 +282,9 @@ class handler:
 
 			sample, index = logReader.readBinaryLog(path)
 			print 'charting for ', mode
+
+
+
 
 
 		if freeMode:

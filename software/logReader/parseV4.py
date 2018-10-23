@@ -27,7 +27,7 @@ def readBinaryLog(file, shortLoad=None):
 	import struct
 	print 'parsing log v4', file
 
-	allKeys = ['RPM', 'RPMRAW', 'RPMIndex', 'calibrate', 'Volt', 'Amp', 'Thrust','Motor Command','Aux Command', 'Time', 'T1', 'T2', 'T3', 'T4', 'autoCalibrate', 'Marker']
+	allKeys = ['RPM', 'RPMRAW', 'RPMSingle', 'RPMIndex', 'calibrate', 'Volt', 'Amp', 'Thrust','Motor Command','Aux Command', 'Time', 'T1', 'T2', 'T3', 'T4', 'autoCalibrate', 'Marker']
 	allSamples = []
 	index = {}
 	for key in allKeys:
@@ -268,8 +268,8 @@ def readBinaryLog(file, shortLoad=None):
 	calibrateCalled = False
 	for sampleIndex in index['RPM']:
 		#tach values aren't valid until calibrate is called in the program
-		if sampleIndex in index['calibrate']: calibrateCalled = True
-		if not calibrateCalled: continue
+		#if sampleIndex in index['calibrate']: calibrateCalled = True
+		#if not calibrateCalled: continue
 
 		#keep a running average of all rpm samples
 		rpm = allSamples[sampleIndex]['RPM']
@@ -306,12 +306,21 @@ def readBinaryLog(file, shortLoad=None):
 
 
 	#apply calibration values
-	for tIndex in index['RPM']:
 
+	rpmAccum = []
+	for tIndex in index['RPM']:
 		tachIndex = allSamples[tIndex]['RPMIndex']
+
 		if tachIndex in calibrateValues.keys():
 			allSamples[tIndex]['RPMRAW']=(allSamples[tIndex]['RPM']/pulsePerRev)
 			allSamples[tIndex]['RPM']=(allSamples[tIndex]['RPM']/pulsePerRev)*numpy.mean(numpy.array( calibrateValues[tachIndex] ))    
+			
+			rpmAccum.append( allSamples[tIndex]['RPMRAW'] )
+			if tachIndex == 1:
+				allSamples[tIndex]['RPMSingle'] = numpy.mean(rpmAccum)
+				index['RPMSingle'].append(tIndex)
+				rpmAccum = []
+
 
 	# reject obvious noise samples
 
